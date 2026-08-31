@@ -5,7 +5,7 @@
   "font": { "family": "DejaVu Sans", "style": "Bold" },
   "rows": 9,
   "pipeline": [
-    { "op": "fill", "kind": "solid", "color": "#f2f4f7" },
+    { "op": "fill", "kind": "solid", "color": "#e5e9f0" },
     {
       "op": "edge",
       "outer": 0,
