@@ -559,10 +559,19 @@ fn run_tui(args: &RenderArgs) -> Result<String, String> {
         .recipe
         .clone()
         .unwrap_or_else(|| "banner.json".to_string());
+    // A loaded file's pipeline is its own: `build_recipe` ignores the
+    // style/colors/weight flags when `--recipe` is given, so claiming those
+    // flag defaults described it would let one weight nudge replace it.
+    let style = if args.recipe.is_some() {
+        None
+    } else {
+        Some(args.style.clone())
+    };
     let mut app = tui::App::new(
         recipe,
         path,
-        args.style.clone(),
+        args.recipe.is_some(),
+        style,
         args.colors.clone(),
         args.weight,
     );

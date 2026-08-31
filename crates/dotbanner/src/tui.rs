@@ -94,13 +94,17 @@ pub struct App {
     /// Where `s` writes. Seeded from `--recipe` so an opened file saves back
     /// to itself.
     path: String,
-    /// The named style the pipeline was last built from. The document
-    /// carries the pipeline itself; this remembers which preset the style
-    /// control points at.
-    style: String,
+    /// The named style the pipeline was last built from. `None` means the
+    /// pipeline came from a file no preset claims: the panel shows "custom",
+    /// and no control rebuilds the pipeline until the user picks a style —
+    /// a weight or palette nudge must not replace effects it did not make.
+    style: Option<String>,
     /// The `--colors` spec: a palette name or a hex list.
     colors: String,
     weight: u32,
+    /// True once `path` names a file this session opened or wrote, so a
+    /// save into it is an update rather than a surprise overwrite.
+    own_file: bool,
     /// Installed families, sorted (the engine sorts for determinism).
     fonts: Vec<String>,
     focus: usize,
@@ -115,17 +119,57 @@ pub struct App {
     /// The serialized document as last saved (or as opened), so quitting
     /// can tell edits-with-a-home from edits-without.
     saved: String,
-    /// Set by a first `q` with unsaved edits; the next `q` really quits.
-    quit_armed: bool,
+    /// A warning that must outlive the next keystroke: the opened file uses
+    /// a newer schema or carries effects this build cannot draw.
+    notice: String,
+    /// An action awaiting its confirming second keystroke.
+    pending: Pending,
     quit: bool,
 }
 
+/// A destructive action a first keystroke has warned about; the same
+/// keystroke again carries it out, any other stands it down.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    None,
+    Quit,
+    Save,
+}
+
 impl App {
-    pub fn new(recipe: Recipe, path: String, style: String, colors: String, weight: u32) -> Self {
+    /// `style: None` marks a document opened from a file: its pipeline is
+    /// custom until the user picks a preset. `own_file` says `path` names
+    /// that opened file.
+    pub fn new(
+        recipe: Recipe,
+        path: String,
+        own_file: bool,
+        style: Option<String>,
+        colors: String,
+        weight: u32,
+    ) -> Self {
+        // These conditions hold for the document's whole lifetime in the
+        // editor, so they live above the one-keystroke status line.
+        let mut notices = Vec::new();
+        if recipe.is_newer_than_this_build() {
+            notices.push(format!(
+                "recipe schema v{} is newer than this build reads",
+                recipe.version
+            ));
+        }
+        let skipped = recipe.unknown_ops();
+        if !skipped.is_empty() {
+            notices.push(format!(
+                "{} layer(s) use effects this build cannot draw: {}",
+                skipped.len(),
+                skipped.join(", ")
+            ));
+        }
         Self {
             saved: recipe.to_json(),
             recipe,
             path,
+            own_file,
             style,
             colors,
             weight,
@@ -136,7 +180,8 @@ impl App {
             dirty: true,
             preview_for: 0,
             preview: Err("rendering…".into()),
-            quit_armed: false,
+            notice: notices.join(" · "),
+            pending: Pending::None,
             quit: false,
         }
     }
@@ -147,14 +192,19 @@ impl App {
 
     /// Rebuild the pipeline from the style/colors/weight controls. Stages
     /// this build cannot render are carried over, not dropped — an older
-    /// build must not destroy an effect a newer one wrote (ADR-202).
+    /// build must not destroy an effect a newer one wrote (ADR-202). A
+    /// custom pipeline (no style picked yet) is never rebuilt.
     fn rebuild_pipeline(&mut self) {
+        let Some(style) = self.style.clone() else {
+            self.status = "the pipeline is custom — pick a style to rebuild it".into();
+            return;
+        };
         let Some(colors) = presets::resolve_colors(&self.colors) else {
             self.status = format!("unknown palette or bad colors: {}", self.colors);
             return;
         };
-        let Some(ops) = presets::style_pipeline_weighted(&self.style, &colors, self.weight) else {
-            self.status = format!("unknown style: {}", self.style);
+        let Some(ops) = presets::style_pipeline_weighted(&style, &colors, self.weight) else {
+            self.status = format!("unknown style: {style}");
             return;
         };
         let unknown: Vec<Stage> = self
@@ -189,14 +239,24 @@ impl App {
                 self.dirty = true;
             }
             Control::Style => {
-                let at = presets::STYLES
-                    .iter()
-                    .position(|s| *s == self.style)
-                    .unwrap_or(0);
-                self.style = presets::STYLES[cycle(at, presets::STYLES.len(), delta)].into();
+                // Leaving "custom" is the one deliberate act that hands the
+                // pipeline to a preset; either direction starts at an end.
+                let next = match &self.style {
+                    Some(style) => {
+                        let at = presets::STYLES.iter().position(|s| s == style).unwrap_or(0);
+                        cycle(at, presets::STYLES.len(), delta)
+                    }
+                    None if delta >= 0 => 0,
+                    None => presets::STYLES.len() - 1,
+                };
+                self.style = Some(presets::STYLES[next].into());
                 self.rebuild_pipeline();
             }
             Control::Palette => {
+                if self.style.is_none() {
+                    self.status = "the pipeline is custom — pick a style to use colors".into();
+                    return;
+                }
                 let names: Vec<String> = scheme::all().into_iter().map(|s| s.name).collect();
                 if names.is_empty() {
                     return;
@@ -219,14 +279,20 @@ impl App {
                 self.dirty = true;
             }
             Control::Weight => {
+                if self.style.is_none() {
+                    self.status = "the pipeline is custom — pick a style to use weight".into();
+                    return;
+                }
                 // The same 0–32 range the CLI flag accepts.
                 let weight = self.weight as i64 + delta;
                 self.weight = weight.clamp(0, 32) as u32;
                 self.rebuild_pipeline();
             }
             Control::Tracking => {
+                // Round to the step so repeated nudges cannot leave float
+                // noise in the saved JSON.
                 let t = self.recipe.size.tracking + delta as f32 * 0.01;
-                self.recipe.size.tracking = t.clamp(0.0, 0.5);
+                self.recipe.size.tracking = (t.clamp(0.0, 0.5) * 100.0).round() / 100.0;
                 self.dirty = true;
             }
         }
@@ -246,27 +312,61 @@ impl App {
         match std::fs::write(&self.path, self.recipe.to_json() + "\n") {
             Ok(()) => {
                 self.saved = self.recipe.to_json();
+                self.own_file = true;
                 self.status = format!("saved {}", self.path);
             }
             Err(e) => self.status = format!("saving {}: {e}", self.path),
         }
     }
 
+    /// Save, after a confirming second `s` when the write would destroy
+    /// something: fields of a schema newer than this build reads (the wire
+    /// parser drops top-level fields it does not know), or a file this
+    /// session never opened.
+    fn request_save(&mut self) {
+        if self.pending == Pending::Save {
+            self.pending = Pending::None;
+            self.save();
+            return;
+        }
+        if self.recipe.is_newer_than_this_build() {
+            self.pending = Pending::Save;
+            self.status = format!(
+                "recipe schema v{} is newer than this build — saving drops fields it cannot \
+                 read; s again to save anyway",
+                self.recipe.version
+            );
+            return;
+        }
+        if !self.own_file && std::path::Path::new(&self.path).exists() {
+            self.pending = Pending::Save;
+            self.status = format!("{} exists — s again to overwrite", self.path);
+            return;
+        }
+        self.save();
+    }
+
     /// Quit, unless there are edits no file has: those want one deliberate
     /// second `q` (or a save) first.
     fn request_quit(&mut self) {
-        if self.quit_armed || self.recipe.to_json() == self.saved {
+        if self.pending == Pending::Quit || self.recipe.to_json() == self.saved {
             self.quit = true;
         } else {
-            self.quit_armed = true;
+            self.pending = Pending::Quit;
             self.status = "unsaved changes — q again to discard, s to save".into();
         }
     }
 
     fn on_key(&mut self, code: KeyCode, modifiers: KeyModifiers) {
-        // Any key that is not the quit key stands down the quit warning.
-        if code != KeyCode::Char('q') {
-            self.quit_armed = false;
+        // Any key other than the one that armed a confirmation stands it
+        // down.
+        match (self.pending, code) {
+            (Pending::Quit, KeyCode::Char('q')) | (Pending::Save, KeyCode::Char('s')) => {}
+            _ => self.pending = Pending::None,
+        }
+        if modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c') {
+            self.quit = true;
+            return;
         }
         if self.mode == Mode::Edit {
             match code {
@@ -279,14 +379,26 @@ impl App {
                         if self.focused() == Control::Palette {
                             self.rebuild_pipeline();
                         }
+                        // Editing the path points at a file this session
+                        // has not written.
+                        if self.focused() == Control::Path {
+                            self.own_file = false;
+                        }
                         self.dirty = true;
                     }
                 }
-                KeyCode::Char(c) => {
+                // A chorded character is a command that means nothing here,
+                // not text.
+                KeyCode::Char(c)
+                    if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
                     if let Some(buf) = self.text_buffer() {
                         buf.push(c);
                         if self.focused() == Control::Palette {
                             self.rebuild_pipeline();
+                        }
+                        if self.focused() == Control::Path {
+                            self.own_file = false;
                         }
                         self.dirty = true;
                     }
@@ -297,8 +409,7 @@ impl App {
         }
         match code {
             KeyCode::Char('q') => self.request_quit(),
-            KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => self.quit = true,
-            KeyCode::Char('s') => self.save(),
+            KeyCode::Char('s') => self.request_save(),
             KeyCode::Up | KeyCode::Char('k') => {
                 self.focus = cycle(self.focus, CONTROLS.len(), -1);
             }
@@ -368,7 +479,7 @@ fn control_line(app: &App, control: Control) -> Line<'static> {
     let value = match control {
         Control::Text => app.recipe.text.clone(),
         Control::Font => app.recipe.font.family.clone(),
-        Control::Style => app.style.clone(),
+        Control::Style => app.style.clone().unwrap_or_else(|| "custom".into()),
         Control::Palette => app.colors.clone(),
         Control::Register => app.recipe.symbolizer.body.as_str().to_string(),
         Control::Rows => app.recipe.size.rows.to_string(),
@@ -448,13 +559,22 @@ fn draw(app: &mut App, frame: &mut Frame) {
         Mode::Navigate => "↑↓ control · ←→ change · enter edit · s save · q quit",
         Mode::Edit => "type to edit · enter/esc done",
     };
-    let status = if app.status.is_empty() {
-        help.to_string()
-    } else {
-        format!("{}   {help}", app.status)
-    };
+    // The transient message, then the standing conditions: a half-typed
+    // palette name (the pipeline still paints with the last valid one), and
+    // the notices the opened file arrived with.
+    let mut parts = Vec::new();
+    if !app.status.is_empty() {
+        parts.push(app.status.clone());
+    }
+    if app.style.is_some() && presets::resolve_colors(&app.colors).is_none() {
+        parts.push(format!("colors '{}' not resolvable yet", app.colors));
+    }
+    if !app.notice.is_empty() {
+        parts.push(app.notice.clone());
+    }
+    parts.push(help.to_string());
     frame.render_widget(
-        Paragraph::new(status).style(Style::default().fg(Color::DarkGray)),
+        Paragraph::new(parts.join("   ")).style(Style::default().fg(Color::DarkGray)),
         status_bar,
     );
 }
@@ -479,14 +599,33 @@ pub fn run(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
 mod tests {
     use super::*;
 
+    /// An App as `tui <text>` builds it: a flag-built document a preset
+    /// describes.
     fn app_with(recipe: Recipe) -> App {
         App::new(
             recipe,
             "out.json".into(),
-            "plain".into(),
+            false,
+            Some("plain".into()),
             "omarchy".into(),
             presets::DEFAULT_WEIGHT,
         )
+    }
+
+    /// An App as `tui --recipe file.json` builds it: a custom pipeline.
+    fn app_with_loaded(recipe: Recipe) -> App {
+        App::new(
+            recipe,
+            "out.json".into(),
+            true,
+            None,
+            "omarchy".into(),
+            presets::DEFAULT_WEIGHT,
+        )
+    }
+
+    fn focus_on(app: &mut App, control: Control) {
+        app.focus = CONTROLS.iter().position(|c| *c == control).unwrap();
     }
 
     #[test]
@@ -497,10 +636,85 @@ mod tests {
             {"op":"fill","kind":"solid","color":"#ffffff"},
             {"op":"warp","amplitude":3}]}"##;
         let mut app = app_with(Recipe::from_json(json).unwrap());
-        app.style = "trap".into();
+        app.style = Some("trap".into());
         app.rebuild_pipeline();
         assert_eq!(app.recipe.unknown_ops(), vec!["warp"]);
         assert!(app.recipe.ops().count() >= 2, "the trap pipeline landed");
+    }
+
+    #[test]
+    fn a_loaded_pipeline_survives_weight_and_palette_touches() {
+        // A file's pipeline is custom: nudging weight or colors must not
+        // replace effects the controls did not make (ADR-202).
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"rim","width":5,"kind":"solid","color":"#123456"}]}"##;
+        let mut app = app_with_loaded(Recipe::from_json(json).unwrap());
+        let before = app.recipe.pipeline.clone();
+        focus_on(&mut app, Control::Weight);
+        app.adjust(1);
+        focus_on(&mut app, Control::Palette);
+        app.adjust(1);
+        assert_eq!(app.recipe.pipeline, before, "custom pipeline untouched");
+
+        // Picking a style is the deliberate hand-over.
+        focus_on(&mut app, Control::Style);
+        app.adjust(1);
+        assert_ne!(app.recipe.pipeline, before, "a chosen preset rebuilds");
+    }
+
+    #[test]
+    fn a_newer_schema_recipe_saves_only_on_a_second_s() {
+        // The wire parser drops top-level fields it does not know, so a
+        // save of a newer file is lossy and wants a deliberate confirm.
+        let dir = std::env::temp_dir().join(format!("dotbanner-tui-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("newer.json");
+        let recipe = Recipe::from_json(r#"{"version":99,"text":"x"}"#).unwrap();
+        let mut app = App::new(
+            recipe,
+            path.to_string_lossy().into_owned(),
+            true,
+            None,
+            "omarchy".into(),
+            1,
+        );
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(!path.exists(), "the first s only warns");
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(path.exists(), "the second s saves");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn saving_over_a_foreign_file_takes_a_second_s() {
+        let dir = std::env::temp_dir().join(format!("dotbanner-tui-clob-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("existing.json");
+        std::fs::write(&path, "precious").unwrap();
+        let mut app = app_with(Recipe::new("hi"));
+        app.path = path.to_string_lossy().into_owned();
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "precious",
+            "the first s only warns"
+        );
+        app.on_key(KeyCode::Char('s'), KeyModifiers::NONE);
+        assert!(
+            std::fs::read_to_string(&path).unwrap().contains("\"text\""),
+            "the second s overwrites"
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_chorded_character_is_not_text() {
+        let mut app = app_with(Recipe::new("hi"));
+        app.mode = Mode::Edit;
+        app.on_key(KeyCode::Char('x'), KeyModifiers::CONTROL);
+        assert_eq!(app.recipe.text, "hi");
+        app.on_key(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.quit, "ctrl-c quits even while editing");
     }
 
     #[test]
