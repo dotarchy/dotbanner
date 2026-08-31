@@ -363,6 +363,20 @@ impl App {
         self.font_apply();
     }
 
+    /// Reselect after a filter change. A keystroke that edits the filter
+    /// expresses no choice of family, so the document's font moves only
+    /// when the filter no longer matches it.
+    fn font_reselect(&mut self) {
+        let list = self.filtered_fonts();
+        match list.iter().position(|f| *f == self.recipe.font.family) {
+            Some(at) => self.font_sel = at,
+            None => {
+                self.font_sel = 0;
+                self.font_apply();
+            }
+        }
+    }
+
     /// The text buffer the Edit mode types into.
     fn text_buffer(&mut self) -> Option<&mut String> {
         match self.focused() {
@@ -450,16 +464,15 @@ impl App {
                 KeyCode::PageUp => self.font_browse(-10),
                 KeyCode::PageDown => self.font_browse(10),
                 KeyCode::Backspace => {
-                    self.font_filter.pop();
-                    self.font_sel = 0;
-                    self.font_apply();
+                    if self.font_filter.pop().is_some() {
+                        self.font_reselect();
+                    }
                 }
                 KeyCode::Char(c)
                     if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
                     self.font_filter.push(c);
-                    self.font_sel = 0;
-                    self.font_apply();
+                    self.font_reselect();
                 }
                 _ => {}
             }
@@ -537,6 +550,12 @@ impl App {
 /// Step `at` by `delta` around a ring of `len` entries.
 fn cycle(at: usize, len: usize, delta: i64) -> usize {
     (at as i64 + delta).rem_euclid(len as i64) as usize
+}
+
+/// Where a `rows`-tall window onto a `len`-long list starts so that `sel`
+/// sits inside it, near the middle where the list allows.
+fn window_offset(sel: usize, len: usize, rows: usize) -> usize {
+    sel.saturating_sub(rows / 2).min(len.saturating_sub(rows))
 }
 
 /// How many bands of `width` columns a grid wraps into.
@@ -652,10 +671,7 @@ fn fonts_panel(app: &App, height: usize) -> Vec<Line<'static>> {
     }
     let rows = height.saturating_sub(1).max(1);
     let sel = app.font_sel.min(list.len() - 1);
-    // Scroll the window so the selection sits inside it.
-    let offset = sel
-        .saturating_sub(rows / 2)
-        .min(list.len().saturating_sub(rows));
+    let offset = window_offset(sel, list.len(), rows);
     for (i, family) in list.iter().enumerate().skip(offset).take(rows) {
         let (marker, style) = if i == sel {
             (
@@ -695,9 +711,9 @@ fn draw(app: &mut App, frame: &mut Frame) {
     );
 
     app.refresh_preview();
-    let inner_width = preview.width.saturating_sub(2) as usize;
+    let inner = Block::default().borders(Borders::ALL).inner(preview);
     let bands = match &app.preview {
-        Ok(grid) => band_count(grid.cols(), inner_width),
+        Ok(grid) => band_count(grid.cols(), inner.width as usize),
         Err(_) => 1,
     };
     let title = if bands > 1 {
@@ -705,20 +721,17 @@ fn draw(app: &mut App, frame: &mut Frame) {
     } else {
         " preview ".to_string()
     };
-    let preview_block = Block::default().borders(Borders::ALL).title(title);
-    let inner = preview_block.inner(preview);
-    frame.render_widget(preview_block, preview);
+    frame.render_widget(Block::default().borders(Borders::ALL).title(title), preview);
     match &app.preview {
         Ok(grid) => {
             let text = grid_text(grid, inner.width as usize);
             // Center when everything fits; clip the tail when it does not.
-            let top = inner
-                .height
-                .saturating_sub(text.lines.len() as u16)
-                .saturating_div(2);
+            // The count stays in usize until after the subtraction: a
+            // pathological wrap can exceed u16.
+            let top = (inner.height as usize).saturating_sub(text.lines.len()) / 2;
             let area = Rect {
-                y: inner.y + top,
-                height: inner.height.saturating_sub(top),
+                y: inner.y + top as u16,
+                height: inner.height.saturating_sub(top as u16),
                 ..inner
             };
             frame.render_widget(Clear, inner);
@@ -1025,6 +1038,48 @@ mod tests {
         app.on_key(KeyCode::Enter, KeyModifiers::NONE);
         assert_eq!(app.view, View::Recipe);
         assert_eq!(app.recipe.font.family, picked);
+    }
+
+    #[test]
+    fn filter_edits_that_still_match_keep_the_document_family() {
+        let mut app = app_with(Recipe::new("hi"));
+        if app.fonts.len() < 2 {
+            return;
+        }
+        // The last family, so a wrong reset would land on a different one.
+        let family = app.fonts.last().unwrap().clone();
+        app.recipe.font.family = family.clone();
+        app.on_key(KeyCode::Char('f'), KeyModifiers::NONE);
+
+        // Backspace on an empty filter is a no-op edit.
+        app.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(app.recipe.font.family, family);
+
+        // Typing the family's own name matches it at every keystroke, so
+        // no keystroke expresses a new choice.
+        for c in family.to_ascii_lowercase().chars().take(4) {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(app.recipe.font.family, family);
+    }
+
+    #[test]
+    fn window_offset_keeps_the_selection_visible() {
+        for (sel, len, rows) in [
+            (0, 100, 10),
+            (50, 100, 10),
+            (99, 100, 10),
+            (0, 3, 10),
+            (2, 3, 1),
+            (5, 6, 3),
+        ] {
+            let off = window_offset(sel, len, rows);
+            assert!(off <= sel, "({sel},{len},{rows}): window starts past it");
+            assert!(
+                sel < off + rows,
+                "({sel},{len},{rows}): window ends before it"
+            );
+        }
     }
 
     #[test]
