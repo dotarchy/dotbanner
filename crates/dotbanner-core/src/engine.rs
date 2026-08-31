@@ -320,10 +320,10 @@ pub fn difference(a: &Mask, b: &Mask) -> Mask {
 /// layers paint over earlier ones).
 pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
     let (bytes, index) = load_font(&recipe.font.family, recipe.font.style.as_deref())?;
-    // Every register shares a 2×4 pixel cell footprint (ADR-201), so the
-    // mask always rasterizes at 4 pixel rows per output row. Em size
-    // overshoots ink height, so scale by a typical cap-height ratio.
-    let px = (recipe.rows as f32 * 4.0) / 0.72;
+    // Registers share a 2×12 pixel cell footprint (ADR-201), so the mask
+    // rasterizes at 12 pixel rows per output row. Em size overshoots ink
+    // height, so scale by a typical cap-height ratio.
+    let px = (recipe.rows as f32 * 12.0) / 0.72;
     // One cell of air between glyphs: at banner sizes, natural side bearings
     // quantize away and letters collide.
     let base = rasterize_tracked(&bytes, index, &recipe.text, px, 0.5, px * 0.06)?;
@@ -406,6 +406,7 @@ fn register_to_set(r: &crate::recipe::Register) -> crate::symbolizer::SymbolSet 
         crate::recipe::Register::Blocks => crate::symbolizer::SymbolSet::Blocks,
         crate::recipe::Register::Braille => crate::symbolizer::SymbolSet::Braille,
         crate::recipe::Register::Facets => crate::symbolizer::SymbolSet::Facets,
+        crate::recipe::Register::Sextants => crate::symbolizer::SymbolSet::Sextants,
     }
 }
 

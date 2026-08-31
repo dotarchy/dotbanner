@@ -177,6 +177,9 @@ pub enum Register {
     #[default]
     Blocks,
     Braille,
+    /// Sextants — 2×3 semigraphics (U+1FB00), finer vertical resolution.
+    /// Needs a font with Symbols for Legacy Computing coverage.
+    Sextants,
     /// Faceted blocks — three-quadrant patterns render as large triangles,
     /// giving edges a cut-face read rather than a step.
     Facets,

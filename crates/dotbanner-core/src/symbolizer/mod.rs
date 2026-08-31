@@ -96,6 +96,10 @@ pub enum SymbolSet {
     Blocks,
     /// Braille patterns (2×4 pixels per cell): U+2800..U+28FF.
     Braille,
+    /// Sextants (2×3 pixels per cell): U+1FB00..U+1FB3B plus `▌▐█`. Fifty
+    /// percent more vertical resolution than quadrants, still a pure
+    /// bit-pattern lookup.
+    Sextants,
     /// Faceted blocks: the same quadrant coverage as [`SymbolSet::Blocks`],
     /// but three-quadrant patterns render as large triangles `◤◥◣◢` instead
     /// of the chunky `▛▜▙▟`, so edges read as cut faces.
@@ -107,6 +111,7 @@ impl SymbolSet {
     pub fn cell_size(self) -> (usize, usize) {
         match self {
             SymbolSet::Blocks | SymbolSet::Facets => (2, 2),
+            SymbolSet::Sextants => (2, 3),
             SymbolSet::Braille => (2, 4),
         }
     }
@@ -229,6 +234,38 @@ fn quad_bits(mask: &Mask, cx: usize, cy: usize) -> usize {
     bits
 }
 
+/// Sextant bit order (Unicode): 1 = top-left, 2 = top-right, 3 = middle-left,
+/// 4 = middle-right, 5 = bottom-left, 6 = bottom-right. The block omits the
+/// three patterns that already exist elsewhere — left half, right half and
+/// full block — so the codepoint index skips them.
+fn sextant_char(mask: &Mask, cx: usize, cy: usize) -> char {
+    let (x, y) = (cx * 2, cy * 3);
+    let mut bits = 0usize;
+    for row in 0..3 {
+        for col in 0..2 {
+            if mask.get(x + col, y + row) {
+                bits |= 1 << (row * 2 + col);
+            }
+        }
+    }
+    sextant_glyph(bits)
+}
+
+fn sextant_glyph(bits: usize) -> char {
+    match bits {
+        0 => ' ',
+        21 => '\u{258C}', // left column: LEFT HALF BLOCK
+        42 => '\u{2590}', // right column: RIGHT HALF BLOCK
+        63 => '\u{2588}', // FULL BLOCK
+        b => {
+            // The block skips the three patterns above, so shift the index
+            // past each one already passed.
+            let idx = b - 1 - usize::from(b > 21) - usize::from(b > 42);
+            char::from_u32(0x1FB00 + idx as u32).expect("sextant index in range")
+        }
+    }
+}
+
 /// Braille dot numbering (Unicode): dots 1–3 run down the left column, 4–6
 /// down the right, dots 7 and 8 are the bottom row left and right.
 fn braille_char(mask: &Mask, cx: usize, cy: usize) -> char {
@@ -275,6 +312,7 @@ pub fn symbolize(mask: &Mask, set: SymbolSet) -> CellGrid {
             cells.push(Cell::new(match set {
                 SymbolSet::Blocks => quad_char(mask, cx, cy),
                 SymbolSet::Facets => facet_char(mask, cx, cy),
+                SymbolSet::Sextants => sextant_char(mask, cx, cy),
                 SymbolSet::Braille => braille_char(mask, cx, cy),
             }));
         }
@@ -296,8 +334,13 @@ pub fn symbolize(mask: &Mask, set: SymbolSet) -> CellGrid {
 pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet) -> CellGrid {
     // Every register shares this pixel footprint per cell, so a braille cast
     // and a block body can occupy one grid (ADR-201).
-    const CELL_W: usize = 2;
-    const CELL_H: usize = 4;
+    // A terminal cell is about twice as tall as it is wide, so the footprint
+    // keeps that 1:2 ratio.
+    const CELL_W: usize = 6;
+    // Twelve pixel rows per cell is the least common multiple of every
+    // register's sub-row count (blocks 2, sextants 3, braille 4), so each
+    // one samples whole sub-blocks with nothing left over.
+    const CELL_H: usize = 12;
 
     let width = layers.iter().map(|l| l.mask.width()).max().unwrap_or(0);
     let height = layers.iter().map(|l| l.mask.height()).max().unwrap_or(0);
@@ -397,31 +440,29 @@ fn cell_glyph(
     cell_h: usize,
 ) -> char {
     let (x0, y0) = (col * cell_w, row * cell_h);
+    let (sub_w, sub_h) = set.cell_size();
+    let (bw, bh) = (cell_w / sub_w, cell_h / sub_h);
+    // A sub-cell is set when at least half its pixels are — majority keeps
+    // thin strokes without letting a single stray pixel fill a sub-cell.
+    let mut sub = Mask::new(sub_w, sub_h);
+    for sy in 0..sub_h {
+        for sx in 0..sub_w {
+            let mut on = 0usize;
+            for dy in 0..bh {
+                for dx in 0..bw {
+                    if mask.get(x0 + sx * bw + dx, y0 + sy * bh + dy) {
+                        on += 1;
+                    }
+                }
+            }
+            sub.set(sx, sy, on * 2 >= bw * bh);
+        }
+    }
     match set {
-        SymbolSet::Braille => {
-            let mut sub = Mask::new(2, 4);
-            for dy in 0..4 {
-                for dx in 0..2 {
-                    sub.set(dx, dy, mask.get(x0 + dx, y0 + dy));
-                }
-            }
-            braille_char(&sub, 0, 0)
-        }
-        SymbolSet::Blocks | SymbolSet::Facets => {
-            let mut sub = Mask::new(2, 2);
-            for qy in 0..2 {
-                for qx in 0..2 {
-                    let on =
-                        (0..cell_h / 2).any(|dy| mask.get(x0 + qx, y0 + qy * (cell_h / 2) + dy));
-                    sub.set(qx, qy, on);
-                }
-            }
-            if matches!(set, SymbolSet::Facets) {
-                facet_char(&sub, 0, 0)
-            } else {
-                quad_char(&sub, 0, 0)
-            }
-        }
+        SymbolSet::Blocks => quad_char(&sub, 0, 0),
+        SymbolSet::Facets => facet_char(&sub, 0, 0),
+        SymbolSet::Sextants => sextant_char(&sub, 0, 0),
+        SymbolSet::Braille => braille_char(&sub, 0, 0),
     }
 }
 
