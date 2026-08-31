@@ -517,7 +517,11 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
             px * recipe.size.tracking,
         )
     };
-    let cell_rows = |m: &Mask| m.height().div_ceil(12);
+    // Padding is added after the solve but lands in the finished banner, so
+    // both searches measure the padded size or `rows` and `fit` are missed
+    // by however far the effects reach.
+    let cell_rows = |m: &Mask| (m.height() + pad * 2).div_ceil(12);
+    let cell_cols = |m: &Mask| (m.width() + pad * 2).div_ceil(6);
 
     // Solve for the em size that yields the requested height. The mask is
     // trimmed to its ink, and ink height depends on the text — caps,
@@ -529,8 +533,10 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
     let mut base = raster(px)?;
 
     if cell_rows(&base) != requested {
-        // Bracket the answer, then bisect. Ink height rises monotonically
-        // with the em size, so a bracket always exists.
+        // Bracket the answer, then bisect. Ink height rises with the em
+        // size, so a bracket exists whenever the requested height is
+        // reachable; the caps below stop an unreachable one from searching
+        // forever, and the result is then the closest height under it.
         let (mut lo, mut hi) = (px, px);
         while cell_rows(&raster(lo)?) > requested && lo > 1.0 {
             lo *= 0.5;
@@ -539,6 +545,7 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
             hi *= 1.5;
         }
         let mut best = raster(lo)?;
+        px = lo;
         for _ in 0..14 {
             let mid = (lo + hi) * 0.5;
             let m = raster(mid)?;
@@ -564,16 +571,25 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
         // Width scales with the em size, so scale it down by how far over
         // the limit the render came out, then settle the remainder.
         for _ in 0..3 {
-            let have = base.width().div_ceil(6);
+            let have = cell_cols(&base);
             if have <= cols {
                 break;
             }
             px *= cols as f32 / have as f32;
             base = raster(px)?;
         }
-        while base.width().div_ceil(6) > cols && px > 4.0 {
-            px *= 0.92;
-            base = raster(px)?;
+        // Step down only while the next size is still renderable: below a
+        // few pixels the text has no ink at all, and erroring there would
+        // be worse than a banner a column too wide.
+        while cell_cols(&base) > cols {
+            let next = px * 0.92;
+            match raster(next) {
+                Ok(m) if next >= 4.0 => {
+                    px = next;
+                    base = m;
+                }
+                _ => break,
+            }
         }
     }
     let base = base.padded(pad);

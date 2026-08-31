@@ -61,14 +61,23 @@ pub fn style_pipeline_weighted(style: &str, colors: &[Rgb], weight: u32) -> Opti
             register: None,
             on_top: false,
         }]),
+        // Weight zero means no edge treatment, so trap becomes its body.
+        "trap" if weight == 0 => Some(vec![Op::Fill {
+            inset: 0,
+            kind: Fill::Solid {
+                color: colors.last().copied().unwrap_or(first),
+            },
+            register: None,
+            on_top: false,
+        }]),
         "trap" => Some(trap_pipeline(colors, weight)),
         // The prototype's braille-behind-blocks shadow, native now: a cast
         // offset down-right in braille, under a gradient body.
         "shadow" => Some(vec![
             Op::Cast {
                 spread: weight,
-                dx: 2 * weight as i32,
-                dy: 2 * weight as i32,
+                dx: (2 * weight).min(i32::MAX as u32) as i32,
+                dy: (2 * weight).min(i32::MAX as u32) as i32,
                 kind: Fill::Solid { color: last },
                 register: Some(Register::Braille),
                 on_top: false,
@@ -221,6 +230,37 @@ mod tests {
             vec![Rgb::new(255, 0, 0), Rgb::new(0, 255, 0)]
         );
         assert!(resolve_colors("not-a-color").is_none());
+    }
+
+    #[test]
+    fn an_outward_style_does_not_inflate_the_requested_height() {
+        // Padding for outward effects lands in the finished banner, so the
+        // height search has to account for it or `rows` is only a hint.
+        use crate::recipe::{Recipe, Size};
+        let colors = gradient("fire").unwrap();
+        for style in ["plain", "shadow", "glow", "sticker", "halo"] {
+            let mut r = Recipe::new("Hello");
+            r.size = Size {
+                rows: 8,
+                ..Size::default()
+            };
+            r.pipeline = style_pipeline(style, &colors)
+                .unwrap()
+                .into_iter()
+                .map(Into::into)
+                .collect();
+            let grid = crate::render(&r).expect("renders");
+            assert_eq!(grid.rows(), 8, "{style} rendered {} rows", grid.rows());
+        }
+    }
+
+    #[test]
+    fn weight_zero_means_no_edge_treatment() {
+        let colors = gradient("omarchy").unwrap();
+        let none = style_pipeline_weighted("trap", &colors, 0).unwrap();
+        let some = style_pipeline_weighted("trap", &colors, 1).unwrap();
+        assert_ne!(none, some, "weight 0 must not silently behave as 1");
+        assert_eq!(none.len(), 1, "no rim at weight 0");
     }
 
     #[test]

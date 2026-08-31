@@ -92,8 +92,12 @@ struct RenderArgs {
     /// Glyph repertoire: blocks, braille, sextants, facets
     #[arg(long, value_name = "REGISTER")]
     register: Option<String>,
-    /// How thick the style's edge treatment is, in mask pixels
-    #[arg(long, default_value_t = presets::DEFAULT_WEIGHT)]
+    /// How thick the style's edge treatment is, in mask pixels (0-32)
+    #[arg(
+        long,
+        default_value_t = presets::DEFAULT_WEIGHT,
+        value_parser = clap::value_parser!(u32).range(0..=32)
+    )]
     weight: u32,
     /// Load a recipe JSON file ("-" for stdin); flags override its fields
     #[arg(long)]
