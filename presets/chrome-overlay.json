@@ -3,15 +3,15 @@
   "name": "chrome-overlay",
   "text": "dotarchy",
   "font": { "family": "DejaVu Sans", "style": "Bold" },
-  "rows": 10,
+  "rows": 9,
   "pipeline": [
-    { "op": "fill", "kind": "solid", "color": "#1c2230" },
+    { "op": "fill", "kind": "solid", "color": "#f2f4f7" },
     {
       "op": "edge",
       "outer": 0,
       "inner": 40,
       "kind": "band",
-      "stops": ["#8fd4ff", "#2a6fd6", "#0a2a6e", "#f8fbff", "#e8c98a", "#a8763a", "#5a3a12"],
+      "stops": ["#8fd4ff", "#2a6fd6", "#0a2a6e", "#ffffff", "#e8c98a", "#a8763a", "#5a3a12"],
       "steps": 14,
       "register": "braille",
       "on_top": true
