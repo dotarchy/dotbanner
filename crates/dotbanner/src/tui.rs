@@ -404,10 +404,8 @@ impl App {
         let Some(p) = &self.picker else {
             return Vec::new();
         };
-        let filter = p.filter.to_ascii_lowercase();
-        p.items
-            .iter()
-            .filter(|i| filter.is_empty() || i.name.to_ascii_lowercase().contains(&filter))
+        filter_items(&p.items, &p.filter)
+            .into_iter()
             .map(|i| i.name.clone())
             .collect()
     }
@@ -423,11 +421,17 @@ impl App {
         }
     }
 
-    /// Open a picker on a control, selecting its current value.
+    /// Open a picker on a control, selecting its current value. A current
+    /// value no item carries (a custom style, a hex list, an unknown
+    /// register, an uninstalled family) leaves the selection at the top,
+    /// unapplied.
     fn open_picker(&mut self, control: Control) {
         let current = self.picker_current(control);
         let items = self.picker_items(control);
-        let sel = items.iter().position(|i| i.name == current).unwrap_or(0);
+        let sel = items
+            .iter()
+            .position(|i| i.name.eq_ignore_ascii_case(&current))
+            .unwrap_or(0);
         self.picker = Some(Picker {
             control,
             filter: String::new(),
@@ -452,7 +456,7 @@ impl App {
             p.sel = sel;
         }
         let item = list[sel].clone();
-        if self.picker_current(control) == item {
+        if self.picker_current(control).eq_ignore_ascii_case(&item) {
             return;
         }
         match control {
@@ -466,10 +470,15 @@ impl App {
                 self.style = Some(item);
                 self.rebuild_pipeline();
             }
+            // With a custom pipeline nothing paints with a palette, so
+            // refuse before touching the spec — the same guard the panel
+            // control has. Writing `colors` anyway would let Enter keep a
+            // palette a later style pick silently adopts.
+            Control::Palette if self.style.is_none() => {
+                self.status = "the pipeline is custom — pick a style to use colors".into();
+            }
             Control::Palette => {
                 self.colors = item;
-                // With a custom pipeline this refuses with a hint, the
-                // same as the panel control.
                 self.rebuild_pipeline();
             }
             Control::Register => {
@@ -483,31 +492,45 @@ impl App {
     }
 
     /// Move the picker selection by `delta`, stopping at the list's ends —
-    /// a picker walks, it does not wrap.
+    /// a picker walks, it does not wrap. Only a selection that actually
+    /// moved applies: Up at the top of the list is not a choice.
     fn picker_browse(&mut self, delta: i64) {
         let len = self.picker_list().len();
         let Some(p) = &mut self.picker else { return };
         if len == 0 {
             return;
         }
-        p.sel = (p.sel as i64 + delta).clamp(0, len as i64 - 1) as usize;
-        self.picker_apply();
+        let sel = p.sel.min(len - 1);
+        let next = (sel as i64 + delta).clamp(0, len as i64 - 1) as usize;
+        p.sel = next;
+        if next != sel {
+            self.picker_apply();
+        }
     }
 
     /// Reselect after a filter change. A keystroke that edits the filter
-    /// expresses no choice, so the document moves only when the filter no
-    /// longer matches its current value.
+    /// expresses no choice, so the document moves only when the filter
+    /// excludes a value an item carries. A value no item ever carried — a
+    /// custom style, a hex list, an unknown register — stays put until ↑↓
+    /// or Enter chooses (ADR-202: the register comment above REGISTERS is
+    /// a promise).
     fn picker_reselect(&mut self) {
         let Some(p) = &self.picker else { return };
         let current = self.picker_current(p.control);
+        let known = p
+            .items
+            .iter()
+            .any(|i| i.name.eq_ignore_ascii_case(&current));
         let list = self.picker_list();
-        let at = list.iter().position(|i| *i == current);
+        let at = list.iter().position(|i| i.eq_ignore_ascii_case(&current));
         let Some(p) = &mut self.picker else { return };
         match at {
             Some(at) => p.sel = at,
             None => {
                 p.sel = 0;
-                self.picker_apply();
+                if known {
+                    self.picker_apply();
+                }
             }
         }
     }
@@ -596,9 +619,14 @@ impl App {
         }
         if self.picker.is_some() {
             match code {
-                // Enter keeps the selection the preview already shows; Esc
-                // puts back everything the picker opened on.
-                KeyCode::Enter => self.picker = None,
+                // Enter chooses the highlighted item — the one keystroke
+                // that IS a choice, so a selection browsing never applied
+                // (a custom style's top row, say) applies here — then
+                // closes. Esc puts back everything the picker opened on.
+                KeyCode::Enter => {
+                    self.picker_apply();
+                    self.picker = None;
+                }
                 KeyCode::Esc => self.picker_revert(),
                 KeyCode::Up => self.picker_browse(-1),
                 KeyCode::Down => self.picker_browse(1),
@@ -818,18 +846,29 @@ fn swatch_spans(ramp: &[Rgb]) -> Vec<Span<'static>> {
         .collect()
 }
 
-/// The picker popover, centered over the preview: the filter line, then a
+/// The items matching a picker's filter, in list order. The list and the
+/// popup both read this, so the highlighted row and the applied item
+/// cannot diverge.
+fn filter_items<'a>(items: &'a [PickerItem], filter: &str) -> Vec<&'a PickerItem> {
+    let filter = filter.to_ascii_lowercase();
+    items
+        .iter()
+        .filter(|i| filter.is_empty() || i.name.to_ascii_lowercase().contains(&filter))
+        .collect()
+}
+
+/// The picker popover, centered over the editor: the filter line, then a
 /// window of the filtered items scrolled to keep the selection visible.
 /// Palette rows carry their ramp as a swatch, register rows their
 /// geometry.
 fn picker_popup(app: &App, frame: &mut Frame, body: Rect) {
     let Some(p) = &app.picker else { return };
-    let filter = p.filter.to_ascii_lowercase();
-    let items: Vec<&PickerItem> = p
-        .items
-        .iter()
-        .filter(|i| filter.is_empty() || i.name.to_ascii_lowercase().contains(&filter))
-        .collect();
+    // A popup that cannot show its border, filter line, and one row has
+    // nothing to draw — and clamp(4, height) would panic below 4.
+    if body.height < 4 || body.width < 8 {
+        return;
+    }
+    let items = filter_items(&p.items, &p.filter);
 
     let width = 46.min(body.width);
     let height = (items.len() as u16 + 3).clamp(4, body.height);
@@ -944,11 +983,21 @@ fn draw(app: &mut App, frame: &mut Frame) {
     picker_popup(app, frame, body);
 
     let help = if app.picker.is_some() {
-        "type to filter · ↑↓ pick · enter keep · esc revert"
+        "type to filter · ↑↓ pick · enter choose · esc revert".to_string()
     } else {
         match app.mode {
-            Mode::Navigate => "↑↓ control · ←→ change · enter pick/edit · s save · q quit",
-            Mode::Edit => "type to edit · enter/esc done",
+            Mode::Navigate => {
+                // Hex lists lost Enter to the picker; say where they went.
+                let hex = if app.focused() == Control::Palette {
+                    " · e hex"
+                } else {
+                    ""
+                };
+                format!(
+                    "↑↓ control · ←→ change · enter pick/edit · f fonts · c colors{hex} · s save · q quit"
+                )
+            }
+            Mode::Edit => "type to edit · enter/esc done".to_string(),
         }
     };
     // The transient message, then the standing conditions: a half-typed
@@ -1308,6 +1357,71 @@ mod tests {
         app.on_key(KeyCode::Esc, KeyModifiers::NONE);
         assert_eq!(app.colors, "omarchy");
         assert_eq!(app.recipe.pipeline, pipeline, "esc restores the pipeline");
+    }
+
+    #[test]
+    fn a_tiny_terminal_cannot_panic_the_popup() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = app_with(Recipe::new("hi"));
+        app.open_picker(Control::Register);
+        for (w, h) in [(10u16, 3u16), (5, 4), (80, 2), (2, 2), (46, 5)] {
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| draw(&mut app, f)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_filter_keystroke_never_applies_over_a_value_no_item_carries() {
+        // A custom pipeline's style is a value no picker item carries, so
+        // typing in the style picker must not hand the pipeline over.
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"rim","width":5,"kind":"solid","color":"#123456"}]}"##;
+        let mut app = app_with_loaded(Recipe::from_json(json).unwrap());
+        let before = app.recipe.pipeline.clone();
+        focus_on(&mut app, Control::Style);
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
+        assert_eq!(app.recipe.pipeline, before, "a filter edit is not a choice");
+        assert_eq!(app.style, None);
+
+        // Up at the top of the list is not a choice either.
+        app.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        app.on_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.recipe.pipeline, before);
+
+        // Enter is: it chooses the highlighted item.
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.style.as_deref(), Some("plain"));
+        assert_ne!(app.recipe.pipeline, before);
+    }
+
+    #[test]
+    fn an_unknown_register_survives_picker_filtering() {
+        // The comment above REGISTERS is a promise (ADR-202): an unknown
+        // register keeps its name until the user moves the control.
+        let json = r##"{"text":"x","symbolizer":{"body":"hexants"}}"##;
+        let mut app = app_with_loaded(Recipe::from_json(json).unwrap());
+        focus_on(&mut app, Control::Register);
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
+        assert_eq!(app.recipe.symbolizer.body.as_str(), "hexants");
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.recipe.symbolizer.body.as_str(), "hexants");
+    }
+
+    #[test]
+    fn the_palette_picker_refuses_a_custom_pipeline() {
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"rim","width":5,"kind":"solid","color":"#123456"}]}"##;
+        let mut app = app_with_loaded(Recipe::from_json(json).unwrap());
+        app.on_key(KeyCode::Char('c'), KeyModifiers::NONE);
+        app.picker_browse(1);
+        assert_eq!(
+            app.colors, "omarchy",
+            "nothing paints with a palette here, so the spec must not move"
+        );
+        assert!(app.status.contains("custom"));
     }
 
     #[test]
