@@ -245,9 +245,12 @@ pub fn symbolize(mask: &Mask, set: SymbolSet) -> CellGrid {
 
 /// Symbolize painted layers into one colored grid.
 ///
-/// Layers paint in order; for each cell the last layer with any set pixel
-/// wins the foreground, and the glyph comes from the union of all layers, so
-/// a rim and its body compose into a single cell without a second pass.
+/// The glyph comes from the union of all layers, so a rim and its body
+/// compose into a single cell without a second pass. The cell's color goes
+/// to the layer covering the most pixels within it — a cell that is mostly
+/// body reads as body even when a rim clips its edge. Ties go to the later
+/// layer, preserving draw order. Majority coverage is what keeps a one-pixel
+/// trap from flooding every edge cell.
 pub fn symbolize_layers(layers: &[crate::engine::Layer], set: SymbolSet) -> CellGrid {
     let width = layers.iter().map(|l| l.mask.width()).max().unwrap_or(0);
     let height = layers.iter().map(|l| l.mask.height()).max().unwrap_or(0);
@@ -269,21 +272,21 @@ pub fn symbolize_layers(layers: &[crate::engine::Layer], set: SymbolSet) -> Cell
         for col in 0..grid.cols() {
             let glyph = grid.get(col, row).map(|c| c.ch).unwrap_or(' ');
             let mut fg = None;
+            let mut best = 0usize;
             for layer in layers {
-                let mut hit = false;
                 let mut sum_y = 0usize;
                 let mut count = 0usize;
                 for dy in 0..ch {
                     for dx in 0..cw {
                         let (x, y) = (col * cw + dx, row * ch + dy);
                         if layer.mask.get(x, y) {
-                            hit = true;
                             sum_y += y;
                             count += 1;
                         }
                     }
                 }
-                if hit {
+                if count >= best && count > 0 {
+                    best = count;
                     let mid = sum_y as f32 / count as f32;
                     let t = if height > 1 {
                         mid / (height - 1) as f32
