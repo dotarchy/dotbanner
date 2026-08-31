@@ -12,16 +12,29 @@ use dotbanner_core::{
     recipe::{Font, Recipe, Register, SymbolizerSpec},
 };
 
+const LADDER: &str = "\
+Three rungs, each one step further in:
+
+  1  flags        dotbanner render \"hello\" --style band --colors fire
+  2  see it       dotbanner recipe \"hello\" --style band --colors fire
+                  prints the recipe those flags built — the whole render as JSON
+  3  edit it      dotbanner render --recipe my.json \"other text\"
+                  every effect, colour and register, composable without flags
+
+Discover what the flags accept:
+  dotbanner show styles · gradients · fonts [filter] · registers";
+
 #[derive(Parser)]
 #[command(
     name = "dotbanner",
     version,
     about = "Terminal banners and figlet-family fonts from real TTF outlines",
+    after_help = LADDER,
     long_about = None
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
 }
 
 #[derive(Subcommand)]
@@ -30,10 +43,10 @@ enum Command {
     Render(RenderArgs),
     /// Print the recipe a set of flags produces, without rendering
     Recipe(RenderArgs),
-    /// Show what's available: styles, gradients, fonts
+    /// Show what's available: styles, gradients, fonts, registers
     Show {
-        /// styles | gradients | fonts
-        what: String,
+        /// styles | gradients | fonts | registers  (omit to list the topics)
+        what: Option<String>,
         /// Sample text for style and gradient previews
         #[arg(default_value = "Aaron")]
         text: String,
@@ -131,14 +144,46 @@ fn build_recipe(args: &RenderArgs) -> Result<Recipe, String> {
     Ok(recipe)
 }
 
-fn render(args: &RenderArgs) -> Result<String, String> {
-    let recipe = build_recipe(args)?;
-    let grid = dotbanner_core::render(&recipe).map_err(|e| match e {
-        engine::EngineError::FontNotFound(f) => {
-            format!("no font matched '{f}' — try: dotbanner show fonts")
+/// Wrap a family in quotes when it contains spaces, so a suggestion can be
+/// pasted straight back onto the command line.
+fn quoted(name: &str) -> String {
+    if name.contains(' ') {
+        format!("\"{name}\"")
+    } else {
+        name.to_string()
+    }
+}
+
+fn font_error(e: engine::EngineError) -> String {
+    match e {
+        engine::EngineError::FontNotFound { query, near } if !near.is_empty() => {
+            let list = near
+                .iter()
+                .map(|n| quoted(n))
+                .collect::<Vec<_>>()
+                .join("  ");
+            format!(
+                "no font matched '{query}'\n  did you mean:  {list}\n  \
+                 browse them:  dotbanner show fonts {query}"
+            )
+        }
+        engine::EngineError::FontNotFound { query, .. } => {
+            format!("no font matched '{query}'\n  list what is installed:  dotbanner show fonts")
+        }
+        engine::EngineError::FontAmbiguous { query, matches } => {
+            let list = matches
+                .iter()
+                .map(|n| format!("\n    {}", quoted(n)))
+                .collect::<String>();
+            format!("'{query}' matches several families — pick one:{list}")
         }
         other => other.to_string(),
-    })?;
+    }
+}
+
+fn render(args: &RenderArgs) -> Result<String, String> {
+    let recipe = build_recipe(args)?;
+    let grid = dotbanner_core::render(&recipe).map_err(font_error)?;
     Ok(ansi::to_ansi(&grid))
 }
 
@@ -180,27 +225,118 @@ fn show(what: &str, text: &str) -> Result<String, String> {
             }
         }
         "fonts" => {
-            for family in engine::list_families() {
-                out.push_str(&family);
+            // The optional text argument filters, since the full list runs to
+            // hundreds of families.
+            let filter = text.to_ascii_lowercase();
+            let all = engine::list_families();
+            let shown: Vec<&String> = all
+                .iter()
+                .filter(|f| filter.is_empty() || f.to_ascii_lowercase().contains(&filter))
+                .collect();
+            if shown.is_empty() {
+                return Err(format!("no installed family matches '{text}'"));
+            }
+            for family in &shown {
+                // Quoted exactly as --font wants it.
+                out.push_str(&quoted(family));
                 out.push('\n');
             }
+            out.push_str(&format!(
+                "\n\x1b[2m{} of {} families · filter with: dotbanner show fonts <text>\x1b[0m\n",
+                shown.len(),
+                all.len()
+            ));
+        }
+        "registers" => {
+            out.push_str(
+                "\x1b[1mregisters\x1b[0m  which glyphs a layer draws with\n\n\
+                 \x1b[1mblocks\x1b[0m    2x2 quadrants — the default, universal font support\n\
+                 \x1b[1mfacets\x1b[0m    2x2, corners as triangles — crystalline edges\n\
+                 \x1b[1msextants\x1b[0m  2x3 semigraphics — finer, needs Legacy Computing coverage\n\
+                 \x1b[1mbraille\x1b[0m   2x4 dots — finest, reads as texture\n\n\
+                 \x1b[2mSet the body register in a recipe's \"symbolizer\", or per layer\n\
+                 with a layer's \"register\". See: dotbanner recipe <text> --style stipple\x1b[0m\n",
+            );
         }
         other => {
             return Err(format!(
-                "don't know how to show '{other}' (styles, gradients, fonts)"
+                "don't know how to show '{other}'\n  \
+                 try:  styles · gradients · fonts · registers"
             ))
         }
     }
     Ok(out)
 }
 
-fn run() -> Result<String, String> {
-    let cli = Cli::parse();
-    match &cli.command {
-        Command::Render(args) => render(args),
-        Command::Recipe(args) => Ok(build_recipe(args)?.to_json() + "\n"),
-        Command::Show { what, text } => show(what, text),
+/// What a bare `dotbanner` prints: what it is, and the shortest thing that
+/// works, before any flag reference.
+fn overview() -> String {
+    format!(
+        "\x1b[1mdotbanner\x1b[0m — terminal banners from the real fonts on your system\n\n\
+         Start here:\n  \
+         dotbanner render \"hello\"\n  \
+         dotbanner render \"hello\" --style band --colors fire\n  \
+         dotbanner show styles\n\n{LADDER}\n\n\
+         \x1b[2mFull flag reference: dotbanner render --help\x1b[0m\n"
+    )
+}
+
+/// clap's own errors are terse ("a value is required for '--font <FONT>'"),
+/// so add the one thing the reader needs next: where to find valid values.
+fn hint_for(err: &clap::Error) -> Option<&'static str> {
+    let text = err.to_string();
+    if text.contains("--font") || text.contains("-f") {
+        Some("\n  font names, quoted and ready to paste:  dotbanner show fonts [filter]")
+    } else if text.contains("--style") {
+        Some("\n  every style, rendered:  dotbanner show styles")
+    } else if text.contains("--colors") {
+        Some("\n  every gradient, rendered:  dotbanner show gradients")
+    } else if text.contains("--recipe") {
+        Some("\n  build one from flags first:  dotbanner recipe \"text\" --style band")
+    } else {
+        None
     }
+}
+
+fn run() -> Result<String, String> {
+    let cli = match Cli::try_parse() {
+        Ok(c) => c,
+        Err(e) => {
+            let hint = hint_for(&e);
+            e.print().ok();
+            if let Some(h) = hint {
+                eprintln!("{h}");
+            }
+            std::process::exit(e.exit_code());
+        }
+    };
+    match &cli.command {
+        None => Ok(overview()),
+        Some(Command::Render(args)) => render(args),
+        Some(Command::Recipe(args)) => Ok(build_recipe(args)?.to_json() + "\n"),
+        Some(Command::Show { what, text }) => match what.as_deref() {
+            None => Ok(show_topics()),
+            Some(w) => show(w, text),
+        },
+    }
+}
+
+/// `show` with no topic lists the topics rather than erroring.
+fn show_topics() -> String {
+    format!(
+        "\x1b[1mdotbanner show\x1b[0m <topic>\n\n  \
+         \x1b[1mstyles\x1b[0m     every effect, rendered           {}\n  \
+         \x1b[1mgradients\x1b[0m  every colour preset, rendered    {}\n  \
+         \x1b[1mfonts\x1b[0m      installed families, quoted for --font\n  \
+         \x1b[1mregisters\x1b[0m  which glyphs a layer can draw with\n\n\
+         \x1b[2mEach takes optional text: dotbanner show styles \"my text\"\x1b[0m\n",
+        presets::STYLES.join(", "),
+        presets::GRADIENTS
+            .iter()
+            .map(|g| g.name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    )
 }
 
 fn main() -> ExitCode {

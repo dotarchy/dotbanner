@@ -68,7 +68,17 @@ pub struct Layer {
 
 #[derive(Debug)]
 pub enum EngineError {
-    FontNotFound(String),
+    /// No family matched; carries the closest names so a caller can suggest
+    /// something quotable.
+    FontNotFound {
+        query: String,
+        near: Vec<String>,
+    },
+    /// Several families matched loosely; the caller should ask which.
+    FontAmbiguous {
+        query: String,
+        matches: Vec<String>,
+    },
     FontUnreadable(String),
     EmptyRender,
 }
@@ -76,7 +86,10 @@ pub enum EngineError {
 impl std::fmt::Display for EngineError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            EngineError::FontNotFound(q) => write!(f, "no font matched '{q}'"),
+            EngineError::FontNotFound { query, .. } => write!(f, "no font matched '{query}'"),
+            EngineError::FontAmbiguous { query, .. } => {
+                write!(f, "'{query}' matches several families")
+            }
             EngineError::FontUnreadable(p) => write!(f, "could not read font: {p}"),
             EngineError::EmptyRender => write!(f, "text rendered to nothing"),
         }
@@ -87,6 +100,20 @@ impl std::error::Error for EngineError {}
 
 /// Locate a font file by family (and optional style) using the system font
 /// database. Returns the file bytes and the face index within it.
+/// Fold a family name for loose comparison: lowercase, no spaces, hyphens
+/// or underscores. "JetBrains Mono" and "jetbrainsmono" fold alike.
+fn fold(name: &str) -> String {
+    name.chars()
+        .filter(|c| !c.is_whitespace() && *c != '-' && *c != '_')
+        .flat_map(|c| c.to_lowercase())
+        .collect()
+}
+
+/// Locate a font file by family (and optional style) using the system font
+/// database. A path loads that file directly. Family matching is exact
+/// first, then case- and separator-insensitive, then substring — so
+/// `jetbrains` finds "JetBrains Mono" without the caller guessing the exact
+/// spelling or quoting.
 pub fn load_font(family: &str, style: Option<&str>) -> Result<(Vec<u8>, u32), EngineError> {
     // A path loads the file directly, so a font can be tried without being
     // installed system-wide.
@@ -96,21 +123,89 @@ pub fn load_font(family: &str, style: Option<&str>) -> Result<(Vec<u8>, u32), En
             std::fs::read(path).map_err(|_| EngineError::FontUnreadable(family.to_string()))?;
         return Ok((bytes, 0));
     }
+
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
+
+    // Resolve the query to one canonical family name.
+    let wanted = fold(family);
+    let mut exact: Option<String> = None;
+    let mut folded: Vec<String> = Vec::new();
+    let mut partial: Vec<String> = Vec::new();
+    for face in db.faces() {
+        for (name, _) in &face.families {
+            if name.eq_ignore_ascii_case(family) {
+                exact = Some(name.clone());
+            } else if fold(name) == wanted {
+                folded.push(name.clone());
+            } else if fold(name).contains(&wanted) {
+                partial.push(name.clone());
+            }
+        }
+    }
+    folded.sort();
+    folded.dedup();
+    partial.sort();
+    partial.dedup();
+
+    // When the shortest candidate is a prefix of every other, it is the base
+    // family and the rest are its variants — "jetbrains" means "JetBrains
+    // Mono", not an ambiguity with "JetBrains Mono NL".
+    let narrow = |v: &mut Vec<String>| {
+        if v.len() > 1 {
+            let shortest = v.iter().min_by_key(|n| n.len()).cloned().unwrap();
+            if v.iter().all(|n| fold(n).starts_with(&fold(&shortest))) {
+                *v = vec![shortest];
+            }
+        }
+    };
+    narrow(&mut folded);
+    narrow(&mut partial);
+
+    let resolved = match exact {
+        Some(name) => name,
+        None if folded.len() == 1 => folded.remove(0),
+        None if !folded.is_empty() => {
+            return Err(EngineError::FontAmbiguous {
+                query: family.to_string(),
+                matches: folded,
+            })
+        }
+        None if partial.len() == 1 => partial.remove(0),
+        None if !partial.is_empty() => {
+            return Err(EngineError::FontAmbiguous {
+                query: family.to_string(),
+                matches: partial.into_iter().take(12).collect(),
+            })
+        }
+        None => {
+            // Nothing contained the query; offer families sharing its first
+            // few letters as a starting point.
+            let head: String = wanted.chars().take(3).collect();
+            let mut near: Vec<String> = db
+                .faces()
+                .flat_map(|f| f.families.iter().map(|(n, _)| n.clone()))
+                .filter(|n| !head.is_empty() && fold(n).starts_with(&head))
+                .collect();
+            near.sort();
+            near.dedup();
+            near.truncate(8);
+            return Err(EngineError::FontNotFound {
+                query: family.to_string(),
+                near,
+            });
+        }
+    };
+
     let want_style = style.map(str::to_ascii_lowercase);
     let mut best: Option<&fontdb::FaceInfo> = None;
     for face in db.faces() {
-        let matches_family = face
-            .families
-            .iter()
-            .any(|(name, _)| name.eq_ignore_ascii_case(family));
-        if !matches_family {
+        if !face.families.iter().any(|(n, _)| n == &resolved) {
             continue;
         }
         let post = face.post_script_name.to_ascii_lowercase();
         let is_wanted = match &want_style {
-            Some(s) => post.contains(s.as_str()),
+            Some(s) => post.contains(&fold(s)) || post.contains(s.as_str()),
             None => face.weight == fontdb::Weight::NORMAL && face.style == fontdb::Style::Normal,
         };
         if is_wanted {
@@ -119,7 +214,10 @@ pub fn load_font(family: &str, style: Option<&str>) -> Result<(Vec<u8>, u32), En
         }
         best.get_or_insert(face);
     }
-    let face = best.ok_or_else(|| EngineError::FontNotFound(family.to_string()))?;
+    let face = best.ok_or_else(|| EngineError::FontNotFound {
+        query: family.to_string(),
+        near: vec![resolved.clone()],
+    })?;
     match &face.source {
         fontdb::Source::File(path) => {
             let bytes = std::fs::read(path)
