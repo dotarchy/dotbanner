@@ -18,7 +18,7 @@ use ratatui::{DefaultTerminal, Frame};
 
 use dotbanner_core::{
     presets,
-    recipe::{Fit, Recipe, Register, Stage},
+    recipe::{Font, Recipe, Register, Stage},
     scheme,
     symbolizer::CellGrid,
 };
@@ -88,6 +88,14 @@ enum Mode {
     Edit,
 }
 
+/// Which sidebar the panel shows: the recipe's controls, or the font
+/// browser — a filterable family list whose selection previews live.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum View {
+    Recipe,
+    Fonts,
+}
+
 pub struct App {
     /// The document. Every control writes into it; save serializes it.
     recipe: Recipe,
@@ -109,12 +117,16 @@ pub struct App {
     fonts: Vec<String>,
     focus: usize,
     mode: Mode,
+    view: View,
+    /// Substring the font browser filters families by.
+    font_filter: String,
+    /// Selected row in the browser's filtered list.
+    font_sel: usize,
+    /// The document's font when the browser opened; Esc restores it.
+    font_entry: Font,
     status: String,
     /// Set when the document changed since the preview was last rendered.
     dirty: bool,
-    /// The pane width the cached preview was rendered for; a resize
-    /// invalidates it.
-    preview_for: u16,
     preview: Result<CellGrid, String>,
     /// The serialized document as last saved (or as opened), so quitting
     /// can tell edits-with-a-home from edits-without.
@@ -176,9 +188,12 @@ impl App {
             fonts: dotbanner_core::engine::list_families(),
             focus: 0,
             mode: Mode::Navigate,
+            view: View::Recipe,
+            font_filter: String::new(),
+            font_sel: 0,
+            font_entry: Font::default(),
             status: String::new(),
             dirty: true,
-            preview_for: 0,
             preview: Err("rendering…".into()),
             notice: notices.join(" · "),
             pending: Pending::None,
@@ -298,6 +313,70 @@ impl App {
         }
     }
 
+    /// Families matching the browser's filter, in list order.
+    fn filtered_fonts(&self) -> Vec<String> {
+        let filter = self.font_filter.to_ascii_lowercase();
+        self.fonts
+            .iter()
+            .filter(|f| filter.is_empty() || f.to_ascii_lowercase().contains(&filter))
+            .cloned()
+            .collect()
+    }
+
+    /// Open the font browser on the document's current family.
+    fn open_fonts(&mut self) {
+        self.view = View::Fonts;
+        self.font_entry = self.recipe.font.clone();
+        self.font_filter.clear();
+        self.font_sel = self
+            .fonts
+            .iter()
+            .position(|f| *f == self.recipe.font.family)
+            .unwrap_or(0);
+    }
+
+    /// Write the browser's selection into the document, so the preview
+    /// shows the highlighted family as it moves.
+    fn font_apply(&mut self) {
+        let list = self.filtered_fonts();
+        if list.is_empty() {
+            return;
+        }
+        self.font_sel = self.font_sel.min(list.len() - 1);
+        let family = list[self.font_sel].clone();
+        if self.recipe.font.family != family {
+            self.recipe.font.family = family;
+            // A face name is per family (see the font control).
+            self.recipe.font.style = None;
+            self.dirty = true;
+        }
+    }
+
+    /// Move the browser selection by `delta`, stopping at the list's ends —
+    /// a browser walks, it does not wrap.
+    fn font_browse(&mut self, delta: i64) {
+        let len = self.filtered_fonts().len();
+        if len == 0 {
+            return;
+        }
+        self.font_sel = (self.font_sel as i64 + delta).clamp(0, len as i64 - 1) as usize;
+        self.font_apply();
+    }
+
+    /// Reselect after a filter change. A keystroke that edits the filter
+    /// expresses no choice of family, so the document's font moves only
+    /// when the filter no longer matches it.
+    fn font_reselect(&mut self) {
+        let list = self.filtered_fonts();
+        match list.iter().position(|f| *f == self.recipe.font.family) {
+            Some(at) => self.font_sel = at,
+            None => {
+                self.font_sel = 0;
+                self.font_apply();
+            }
+        }
+    }
+
     /// The text buffer the Edit mode types into.
     fn text_buffer(&mut self) -> Option<&mut String> {
         match self.focused() {
@@ -368,6 +447,37 @@ impl App {
             self.quit = true;
             return;
         }
+        if self.view == View::Fonts {
+            match code {
+                // Enter keeps the selection the preview already shows; Esc
+                // puts back the font the browser opened on.
+                KeyCode::Enter => self.view = View::Recipe,
+                KeyCode::Esc => {
+                    if self.recipe.font != self.font_entry {
+                        self.recipe.font = self.font_entry.clone();
+                        self.dirty = true;
+                    }
+                    self.view = View::Recipe;
+                }
+                KeyCode::Up => self.font_browse(-1),
+                KeyCode::Down => self.font_browse(1),
+                KeyCode::PageUp => self.font_browse(-10),
+                KeyCode::PageDown => self.font_browse(10),
+                KeyCode::Backspace => {
+                    if self.font_filter.pop().is_some() {
+                        self.font_reselect();
+                    }
+                }
+                KeyCode::Char(c)
+                    if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    self.font_filter.push(c);
+                    self.font_reselect();
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.mode == Mode::Edit {
             match code {
                 KeyCode::Esc | KeyCode::Enter => self.mode = Mode::Navigate,
@@ -418,28 +528,22 @@ impl App {
             }
             KeyCode::Left | KeyCode::Char('h') => self.adjust(-1),
             KeyCode::Right | KeyCode::Char('l') => self.adjust(1),
+            KeyCode::Char('f') => self.open_fonts(),
+            KeyCode::Enter if self.focused() == Control::Font => self.open_fonts(),
             KeyCode::Enter if self.focused().takes_text() => self.mode = Mode::Edit,
             _ => {}
         }
     }
 
-    /// Render the preview for a pane `width` columns wide, reusing the cache
-    /// when neither the document nor the pane changed.
-    fn refresh_preview(&mut self, width: u16) {
-        if !self.dirty && self.preview_for == width {
+    /// Re-render the preview when the document changed. The banner renders
+    /// at the document's own size — fitting the pane is the wrap's job in
+    /// `grid_text` — so the grid is exactly what `render` would print.
+    fn refresh_preview(&mut self) {
+        if !self.dirty {
             return;
         }
         self.dirty = false;
-        self.preview_for = width;
-        if width == 0 {
-            self.preview = Err("no room".into());
-            return;
-        }
-        // The preview always fits its pane; the document's own `fit` is a
-        // property of the saved recipe, not of this window.
-        let mut preview = self.recipe.clone();
-        preview.size.fit = Some(Fit::Columns(width as usize));
-        self.preview = dotbanner_core::render(&preview).map_err(|e| e.to_string());
+        self.preview = dotbanner_core::render(&self.recipe).map_err(|e| e.to_string());
     }
 }
 
@@ -448,26 +552,55 @@ fn cycle(at: usize, len: usize, delta: i64) -> usize {
     (at as i64 + delta).rem_euclid(len as i64) as usize
 }
 
+/// Where a `rows`-tall window onto a `len`-long list starts so that `sel`
+/// sits inside it, near the middle where the list allows.
+fn window_offset(sel: usize, len: usize, rows: usize) -> usize {
+    sel.saturating_sub(rows / 2).min(len.saturating_sub(rows))
+}
+
+/// How many bands of `width` columns a grid wraps into.
+fn band_count(cols: usize, width: usize) -> usize {
+    if width == 0 || cols == 0 {
+        1
+    } else {
+        cols.div_ceil(width)
+    }
+}
+
 /// A `CellGrid` as ratatui text: each cell's glyph with its truecolor
-/// foreground and background.
-fn grid_text(grid: &CellGrid) -> Text<'static> {
-    let mut lines = Vec::with_capacity(grid.rows());
-    for row in 0..grid.rows() {
-        let mut spans = Vec::with_capacity(grid.cols());
-        for col in 0..grid.cols() {
-            let Some(cell) = grid.get(col, row) else {
-                continue;
-            };
-            let mut style = Style::default();
-            if let Some(fg) = cell.fg {
-                style = style.fg(Color::Rgb(fg.r, fg.g, fg.b));
-            }
-            if let Some(bg) = cell.bg {
-                style = style.bg(Color::Rgb(bg.r, bg.g, bg.b));
-            }
-            spans.push(Span::styled(cell.ch.to_string(), style));
+/// foreground and background. A grid wider than `width` wraps into bands —
+/// each further `width` columns continue below, separated by a blank row —
+/// so a banner that runs off the pane reads on instead of clipping.
+fn grid_text(grid: &CellGrid, width: usize) -> Text<'static> {
+    let bands = band_count(grid.cols(), width);
+    let mut lines = Vec::with_capacity(bands * (grid.rows() + 1));
+    for band in 0..bands {
+        if band > 0 {
+            lines.push(Line::default());
         }
-        lines.push(Line::from(spans));
+        let start = band * width;
+        let end = if width == 0 {
+            grid.cols()
+        } else {
+            (start + width).min(grid.cols())
+        };
+        for row in 0..grid.rows() {
+            let mut spans = Vec::with_capacity(end - start);
+            for col in start..end {
+                let Some(cell) = grid.get(col, row) else {
+                    continue;
+                };
+                let mut style = Style::default();
+                if let Some(fg) = cell.fg {
+                    style = style.fg(Color::Rgb(fg.r, fg.g, fg.b));
+                }
+                if let Some(bg) = cell.bg {
+                    style = style.bg(Color::Rgb(bg.r, bg.g, bg.b));
+                }
+                spans.push(Span::styled(cell.ch.to_string(), style));
+            }
+            lines.push(Line::from(spans));
+        }
     }
     Text::from(lines)
 }
@@ -516,36 +649,93 @@ fn control_line(app: &App, control: Control) -> Line<'static> {
     ])
 }
 
+/// The font browser panel: the filter line, then a window of the filtered
+/// families scrolled to keep the selection visible.
+fn fonts_panel(app: &App, height: usize) -> Vec<Line<'static>> {
+    let list = app.filtered_fonts();
+    let mut lines = vec![Line::from(vec![
+        Span::styled("  filter   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!(" {} ", app.font_filter),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    if list.is_empty() {
+        lines.push(Line::from(format!(
+            "  no family matches '{}'",
+            app.font_filter
+        )));
+        return lines;
+    }
+    let rows = height.saturating_sub(1).max(1);
+    let sel = app.font_sel.min(list.len() - 1);
+    let offset = window_offset(sel, list.len(), rows);
+    for (i, family) in list.iter().enumerate().skip(offset).take(rows) {
+        let (marker, style) = if i == sel {
+            (
+                "▸ ",
+                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+            )
+        } else {
+            ("  ", Style::default())
+        };
+        lines.push(Line::from(vec![
+            Span::raw(marker),
+            Span::styled(format!(" {family} "), style),
+        ]));
+    }
+    lines
+}
+
 fn draw(app: &mut App, frame: &mut Frame) {
     let [body, status_bar] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(frame.area());
     let [panel, preview] =
         Layout::horizontal([Constraint::Length(34), Constraint::Min(10)]).areas(body);
 
-    let lines: Vec<Line> = CONTROLS.iter().map(|c| control_line(app, *c)).collect();
+    let (panel_title, lines) = match app.view {
+        View::Recipe => (
+            " recipe ".to_string(),
+            CONTROLS.iter().map(|c| control_line(app, *c)).collect(),
+        ),
+        View::Fonts => (
+            format!(" fonts {}/{} ", app.filtered_fonts().len(), app.fonts.len()),
+            fonts_panel(app, panel.height.saturating_sub(2) as usize),
+        ),
+    };
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" recipe ")),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(panel_title)),
         panel,
     );
 
-    let preview_block = Block::default().borders(Borders::ALL).title(" preview ");
-    let inner = preview_block.inner(preview);
-    frame.render_widget(preview_block, preview);
-    app.refresh_preview(inner.width);
+    app.refresh_preview();
+    let inner = Block::default().borders(Borders::ALL).inner(preview);
+    let bands = match &app.preview {
+        Ok(grid) => band_count(grid.cols(), inner.width as usize),
+        Err(_) => 1,
+    };
+    let title = if bands > 1 {
+        format!(" preview · wrapped ×{bands} ")
+    } else {
+        " preview ".to_string()
+    };
+    frame.render_widget(Block::default().borders(Borders::ALL).title(title), preview);
     match &app.preview {
         Ok(grid) => {
-            // Center a banner shorter than the pane; a taller one clips.
-            let top = inner
-                .height
-                .saturating_sub(grid.rows() as u16)
-                .saturating_div(2);
+            let text = grid_text(grid, inner.width as usize);
+            // Center when everything fits; clip the tail when it does not.
+            // The count stays in usize until after the subtraction: a
+            // pathological wrap can exceed u16.
+            let top = (inner.height as usize).saturating_sub(text.lines.len()) / 2;
             let area = Rect {
-                y: inner.y + top,
-                height: inner.height.saturating_sub(top),
+                y: inner.y + top as u16,
+                height: inner.height.saturating_sub(top as u16),
                 ..inner
             };
             frame.render_widget(Clear, inner);
-            frame.render_widget(Paragraph::new(grid_text(grid)), area);
+            frame.render_widget(Paragraph::new(text), area);
         }
         Err(msg) => {
             frame.render_widget(
@@ -555,9 +745,10 @@ fn draw(app: &mut App, frame: &mut Frame) {
         }
     }
 
-    let help = match app.mode {
-        Mode::Navigate => "↑↓ control · ←→ change · enter edit · s save · q quit",
-        Mode::Edit => "type to edit · enter/esc done",
+    let help = match (app.view, app.mode) {
+        (View::Fonts, _) => "type to filter · ↑↓ pick · enter keep · esc revert",
+        (_, Mode::Navigate) => "↑↓ control · ←→ change · enter edit · f fonts · s save · q quit",
+        (_, Mode::Edit) => "type to edit · enter/esc done",
     };
     // The transient message, then the standing conditions: a half-typed
     // palette name (the pipeline still paints with the last valid one), and
@@ -579,17 +770,28 @@ fn draw(app: &mut App, frame: &mut Frame) {
     );
 }
 
+fn handle(app: &mut App, event: Event) {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            // A new keystroke supersedes the message about the last one.
+            app.status.clear();
+            app.on_key(key.code, key.modifiers);
+        }
+        // A recipe with `fit: terminal` measures at render time.
+        Event::Resize(..) => app.dirty = true,
+        _ => {}
+    }
+}
+
 pub fn run(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
     while !app.quit {
         terminal.draw(|frame| draw(app, frame))?;
-        match event::read()? {
-            Event::Key(key) if key.kind == KeyEventKind::Press => {
-                // A new keystroke supersedes the message about the last one.
-                app.status.clear();
-                app.on_key(key.code, key.modifiers);
-            }
-            Event::Resize(..) => {}
-            _ => {}
+        // Block for the first event, then drain whatever arrived while the
+        // frame rendered: a typing burst costs one render at its end, not
+        // one per key queued behind the last.
+        handle(app, event::read()?);
+        while !app.quit && event::poll(std::time::Duration::ZERO)? {
+            handle(app, event::read()?);
         }
     }
     Ok(())
@@ -784,7 +986,116 @@ mod tests {
     fn the_preview_never_writes_fit_into_the_document() {
         let mut app = app_with(Recipe::new("hi"));
         app.rebuild_pipeline();
-        app.refresh_preview(40);
+        app.refresh_preview();
         assert_eq!(app.recipe.size.fit, None, "fit belongs to the pane");
+    }
+
+    #[test]
+    fn a_wide_grid_wraps_into_bands() {
+        use dotbanner_core::symbolizer::{symbolize, Mask, SymbolSet};
+        // 12×12 pixels at the blocks register's 2×2 sub-blocks per cell:
+        // a 6×6 cell grid.
+        let mask = Mask::from_sketch(&["############"; 12].join("\n"));
+        let grid = symbolize(&mask, SymbolSet::Blocks);
+        assert_eq!((grid.cols(), grid.rows()), (6, 6));
+
+        let wrapped = grid_text(&grid, 3);
+        assert_eq!(wrapped.lines.len(), 13, "two bands and a separator row");
+        let flat = grid_text(&grid, 10);
+        assert_eq!(flat.lines.len(), 6, "a fitting grid does not wrap");
+
+        assert_eq!(band_count(0, 5), 1);
+        assert_eq!(band_count(5, 0), 1, "a zero-width pane must not divide");
+        assert_eq!(band_count(10, 4), 3);
+    }
+
+    #[test]
+    fn the_font_browser_previews_keeps_and_reverts() {
+        let mut app = app_with(Recipe::new("hi"));
+        if app.fonts.len() < 2 {
+            return; // Not enough fonts installed to browse.
+        }
+        let original = app.recipe.font.clone();
+
+        // Browsing writes the highlighted family into the document; Esc
+        // puts the original back.
+        app.on_key(KeyCode::Char('f'), KeyModifiers::NONE);
+        assert_eq!(app.view, View::Fonts);
+        app.font_sel = 0;
+        app.font_apply();
+        app.font_browse(1);
+        assert_eq!(app.recipe.font.family, app.filtered_fonts()[1]);
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Recipe);
+        assert_eq!(app.recipe.font, original, "esc reverts the preview");
+
+        // Enter keeps what the preview shows.
+        app.on_key(KeyCode::Char('f'), KeyModifiers::NONE);
+        app.font_sel = 0;
+        app.font_apply();
+        app.font_browse(1);
+        let picked = app.recipe.font.family.clone();
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.view, View::Recipe);
+        assert_eq!(app.recipe.font.family, picked);
+    }
+
+    #[test]
+    fn filter_edits_that_still_match_keep_the_document_family() {
+        let mut app = app_with(Recipe::new("hi"));
+        if app.fonts.len() < 2 {
+            return;
+        }
+        // The last family, so a wrong reset would land on a different one.
+        let family = app.fonts.last().unwrap().clone();
+        app.recipe.font.family = family.clone();
+        app.on_key(KeyCode::Char('f'), KeyModifiers::NONE);
+
+        // Backspace on an empty filter is a no-op edit.
+        app.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        assert_eq!(app.recipe.font.family, family);
+
+        // Typing the family's own name matches it at every keystroke, so
+        // no keystroke expresses a new choice.
+        for c in family.to_ascii_lowercase().chars().take(4) {
+            app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
+        }
+        assert_eq!(app.recipe.font.family, family);
+    }
+
+    #[test]
+    fn window_offset_keeps_the_selection_visible() {
+        for (sel, len, rows) in [
+            (0, 100, 10),
+            (50, 100, 10),
+            (99, 100, 10),
+            (0, 3, 10),
+            (2, 3, 1),
+            (5, 6, 3),
+        ] {
+            let off = window_offset(sel, len, rows);
+            assert!(off <= sel, "({sel},{len},{rows}): window starts past it");
+            assert!(
+                sel < off + rows,
+                "({sel},{len},{rows}): window ends before it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unmatched_font_filter_keeps_the_document() {
+        let mut app = app_with(Recipe::new("hi"));
+        if app.fonts.is_empty() {
+            return;
+        }
+        app.on_key(KeyCode::Char('f'), KeyModifiers::NONE);
+        let before = app.recipe.font.clone();
+        // '@' appears in no family name, so no intermediate keystroke can
+        // match either.
+        for _ in 0..4 {
+            app.on_key(KeyCode::Char('@'), KeyModifiers::NONE);
+        }
+        assert!(app.filtered_fonts().is_empty());
+        assert_eq!(app.recipe.font, before, "no match, no change");
     }
 }
