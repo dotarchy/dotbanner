@@ -811,7 +811,9 @@ pub fn run(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
         // Wait for the next event — or, when a render is pending, only
         // until its cooldown expires, so the pause in the input is itself
         // what triggers the render. Each frame drains every queued event
-        // before drawing again.
+        // before drawing again. The idle arm stays a long poll rather
+        // than a blocking read(): one wait shape is what lets the dirty
+        // deadline double as the timeout.
         let wait = if app.dirty {
             app.render_after
                 .saturating_duration_since(Instant::now())
@@ -1111,7 +1113,9 @@ mod tests {
         app.refresh_preview();
         assert!(app.dirty, "within the cooldown the render waits");
 
-        app.render_after = Instant::now() - Duration::from_millis(1);
+        app.render_after = Instant::now()
+            .checked_sub(Duration::from_millis(1))
+            .unwrap_or_else(Instant::now);
         app.refresh_preview();
         assert!(!app.dirty, "past the deadline the render runs");
     }
