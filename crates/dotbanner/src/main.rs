@@ -47,9 +47,8 @@ enum Command {
     Show {
         /// styles | gradients | fonts | registers  (omit to list the topics)
         what: Option<String>,
-        /// Sample text for style and gradient previews
-        #[arg(default_value = "Aaron")]
-        text: String,
+        /// Sample text for style and gradient previews; a filter for fonts
+        text: Option<String>,
     },
 }
 
@@ -187,14 +186,19 @@ fn render(args: &RenderArgs) -> Result<String, String> {
     Ok(ansi::to_ansi(&grid))
 }
 
-fn show(what: &str, text: &str) -> Result<String, String> {
+/// `text` carries two meanings: sample text for the rendered topics, and a
+/// filter for `fonts`. It stays optional so an absent one means "no filter"
+/// rather than filtering for the sample.
+fn show(what: &str, text: Option<&str>) -> Result<String, String> {
+    const SAMPLE: &str = "dotbanner";
+    let sample = text.unwrap_or(SAMPLE);
     let mut out = String::new();
     match what {
         "styles" => {
             for style in presets::STYLES {
                 out.push_str(&format!("\n\x1b[2m──── {style}\x1b[0m\n"));
                 let args = RenderArgs {
-                    text: Some(text.to_string()),
+                    text: Some(sample.to_string()),
                     font: "DejaVu Sans".into(),
                     style_name: None,
                     rows: 7,
@@ -211,7 +215,7 @@ fn show(what: &str, text: &str) -> Result<String, String> {
             for g in presets::GRADIENTS {
                 out.push_str(&format!("\n\x1b[2m──── {}\x1b[0m\n", g.name));
                 let args = RenderArgs {
-                    text: Some(text.to_string()),
+                    text: Some(sample.to_string()),
                     font: "DejaVu Sans".into(),
                     style_name: None,
                     rows: 6,
@@ -227,14 +231,18 @@ fn show(what: &str, text: &str) -> Result<String, String> {
         "fonts" => {
             // The optional text argument filters, since the full list runs to
             // hundreds of families.
-            let filter = text.to_ascii_lowercase();
+            let filter = text.unwrap_or_default().to_ascii_lowercase();
             let all = engine::list_families();
             let shown: Vec<&String> = all
                 .iter()
                 .filter(|f| filter.is_empty() || f.to_ascii_lowercase().contains(&filter))
                 .collect();
             if shown.is_empty() {
-                return Err(format!("no installed family matches '{text}'"));
+                return Err(format!(
+                    "no installed family matches '{}'\n  \
+                     list them all:  dotbanner show fonts",
+                    filter
+                ));
             }
             for family in &shown {
                 // Quoted exactly as --font wants it.
@@ -316,7 +324,7 @@ fn run() -> Result<String, String> {
         Some(Command::Recipe(args)) => Ok(build_recipe(args)?.to_json() + "\n"),
         Some(Command::Show { what, text }) => match what.as_deref() {
             None => Ok(show_topics()),
-            Some(w) => show(w, text),
+            Some(w) => show(w, text.as_deref()),
         },
     }
 }
