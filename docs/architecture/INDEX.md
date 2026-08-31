@@ -42,3 +42,4 @@ _Pixels-to-cells mapping — symbol sets, coverage, determinism_
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-400](./symbolizer/ADR-400-own-the-pixels-to-cells-symbolizer-instead-of-wrapping-chafa.md) | Own the pixels-to-cells symbolizer instead of wrapping chafa | Proposed |
+| [ADR-401](./symbolizer/ADR-401-cell-space-corner-smoothing-as-an-opt-in-polish-pass.md) | Cell-space corner smoothing as an opt-in polish pass | Draft |
