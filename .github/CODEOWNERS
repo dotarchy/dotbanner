@@ -1,0 +1,24 @@
+# CODEOWNERS — principally AI-developed project (ADR-100).
+# Agent roles annotate which specialist owns each path; GitHub review
+# assignment resolves to the human operator.
+
+# agent: project-lead — architecture, ADRs, cross-cutting concerns
+* @aaronsb
+
+# agent: recipe-keeper — the recipe JSON contract (ADR-200): schema,
+# presets, compatibility. Schema changes require a recipe-domain ADR.
+/crates/dotbanner-core/src/recipe/ @aaronsb
+/presets/ @aaronsb
+
+# agent: engine-dev — rasterization, image-space effects (ADR-300)
+/crates/dotbanner-core/src/engine/ @aaronsb
+
+# agent: symbolizer-dev — pixels-to-cells mapping (ADR-400); determinism
+# is a hard invariant, golden-file tests gate changes
+/crates/dotbanner-core/src/symbolizer/ @aaronsb
+
+# agent: surfaces-dev — TUI, CLI, output format emitters
+/crates/dotbanner/ @aaronsb
+/crates/dotbanner-core/src/formats/ @aaronsb
+
+/docs/architecture/ @aaronsb

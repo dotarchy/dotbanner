@@ -1,0 +1,61 @@
+# ADR Configuration
+# Defines domain numbering and validation rules.
+# Used by: docs/scripts/adr  — and, if the doc catalog is installed,
+#          docs/scripts/{doc,doclint}: prose docs share these same domain bands
+#          (the "shared first octet"; catalog ids are DD.NNN.P). See ADR-302
+#          in agent-ways for the design.
+
+project_name: dotbanner
+
+# Domain Number Series — matched to the render pipeline architecture:
+# a recipe document flows through the engine into the symbolizer and out
+# through the surfaces (TUI, CLI, output formats).
+domains:
+  meta:
+    range: [100, 199]
+    name: Meta
+    description: Process, scaffold, repo conventions, releases
+    folder: meta
+
+  recipe:
+    range: [200, 299]
+    name: Recipe
+    description: The recipe JSON contract — schema, presets, compatibility
+    folder: recipe
+
+  engine:
+    range: [300, 399]
+    name: Engine
+    description: Rasterization, image-space effects, the pipeline model
+    folder: engine
+
+  symbolizer:
+    range: [400, 499]
+    name: Symbolizer
+    description: Pixels-to-cells mapping — symbol sets, coverage, determinism
+    folder: symbolizer
+
+  surfaces:
+    range: [500, 599]
+    name: Surfaces
+    description: TUI, CLI, and output sinks (tlf/flf/cfonts/ans/sh, preview)
+    folder: surfaces
+
+# Valid ADR statuses
+statuses:
+  - Draft
+  - Proposed
+  - Accepted
+  - Superseded
+  - Deprecated
+
+defaults:
+  deciders:
+    - aaronsb
+  status: Draft
+
+legacy:
+  range: [1, 99]
+  label: "Legacy (Pre-Domain Numbering)"
+
+viewer: cat {file}
