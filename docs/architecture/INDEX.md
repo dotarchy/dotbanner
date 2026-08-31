@@ -43,3 +43,4 @@ _Pixels-to-cells mapping — symbol sets, coverage, determinism_
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-400](./symbolizer/ADR-400-own-the-pixels-to-cells-symbolizer-instead-of-wrapping-chafa.md) | Own the pixels-to-cells symbolizer instead of wrapping chafa | Accepted |
+| [ADR-402](./symbolizer/ADR-402-two-color-cells-foreground-glyph-over-composited-background.md) | Two-color cells — foreground glyph over composited background | Accepted |

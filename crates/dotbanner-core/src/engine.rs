@@ -51,13 +51,19 @@ impl Paint {
     }
 }
 
-/// A painted region of the render: which pixels, how they're colored, and
-/// which symbol register draws them (`None` follows the recipe's body).
+/// A painted region of the render: which pixels, how they're colored, which
+/// symbol register draws them (`None` follows the recipe's body), and whether
+/// it draws over whatever it overlaps.
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub mask: Mask,
     pub paint: Paint,
     pub register: Option<crate::symbolizer::SymbolSet>,
+    /// When set, this layer draws the glyph in any cell it touches and pushes
+    /// the layer it overlaps into the cell background. A braille layer marked
+    /// this way stipples its dots over a solid body, the body's own color
+    /// showing through as the ground.
+    pub on_top: bool,
 }
 
 #[derive(Debug)]
@@ -324,17 +330,22 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
 
     let mut layers = Vec::new();
     for op in &recipe.pipeline {
-        let (mask, kind, register) = match op {
-            Op::Fill { kind, register } => (base.clone(), kind, register),
+        let (mask, kind, register, on_top) = match op {
+            Op::Fill {
+                kind,
+                register,
+                on_top,
+            } => (base.clone(), kind, register, *on_top),
             Op::Rim {
                 width,
                 kind,
                 register,
+                on_top,
             } => {
                 // The body minus its eroded core. A fill painted before this
                 // stays visible inside, leaving the rim proud at the edges.
                 let core = erode(&base, *width);
-                (difference(&base, &core), kind, register)
+                (difference(&base, &core), kind, register, *on_top)
             }
             Op::Cast {
                 spread,
@@ -342,11 +353,26 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
                 dy,
                 kind,
                 register,
+                on_top,
             } => {
                 // Outside the glyph only: the dilated, offset shape minus
                 // the body, so a cast never paints over its own letterform.
                 let spread_mask = dilate_offset(&base, *spread, *dx, *dy);
-                (difference(&spread_mask, &base), kind, register)
+                (difference(&spread_mask, &base), kind, register, *on_top)
+            }
+            Op::Edge {
+                outer,
+                inner,
+                kind,
+                register,
+                on_top,
+            } => {
+                // A band straddling the boundary: everything within `outer`
+                // pixels outside, minus everything deeper than `inner`
+                // pixels inside.
+                let grown = dilate_offset(&base, *outer, 0, 0);
+                let core = erode(&base, *inner);
+                (difference(&grown, &core), kind, register, *on_top)
             }
         };
         let paint = match kind {
@@ -360,6 +386,7 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
             mask,
             paint,
             register: register.as_ref().map(register_to_set),
+            on_top,
         });
     }
     if layers.is_empty() {
@@ -367,6 +394,7 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
             mask: base,
             paint: Paint::Solid(Rgb::new(0xff, 0xff, 0xff)),
             register: None,
+            on_top: false,
         });
     }
     Ok(layers)

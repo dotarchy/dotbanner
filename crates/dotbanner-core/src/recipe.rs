@@ -52,6 +52,7 @@ impl Recipe {
                     color: Rgb::new(0xff, 0xff, 0xff),
                 },
                 register: None,
+                on_top: false,
             }],
             symbolizer: SymbolizerSpec::default(),
         }
@@ -93,6 +94,8 @@ pub enum Op {
         kind: Fill,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         register: Option<Register>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        on_top: bool,
     },
     /// Paint an inner edge band: the body minus its eroded core. `width` is
     /// in mask pixels, so values below one cell are subpixel traps.
@@ -103,6 +106,8 @@ pub enum Op {
         kind: Fill,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         register: Option<Register>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        on_top: bool,
     },
     /// Paint outside the body: the glyph dilated by `spread` and offset by
     /// (`dx`, `dy`), minus the body itself — a drop shadow, outline, or glow.
@@ -117,6 +122,25 @@ pub enum Op {
         kind: Fill,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         register: Option<Register>,
+        /// Draw over whatever this overlaps instead of contesting by
+        /// coverage; the overlapped layer becomes the cell background.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        on_top: bool,
+    },
+    /// Paint a band straddling the glyph edge: `outer` pixels beyond it and
+    /// `inner` pixels within. With a gradient paint it fades in both
+    /// directions at once across the letterform boundary.
+    Edge {
+        #[serde(default = "default_width")]
+        outer: u32,
+        #[serde(default = "default_width")]
+        inner: u32,
+        #[serde(flatten)]
+        kind: Fill,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        register: Option<Register>,
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        on_top: bool,
     },
 }
 
@@ -185,6 +209,7 @@ mod tests {
                         steps: Some(10),
                     },
                     register: None,
+                    on_top: false,
                 },
                 Op::Rim {
                     width: 5,
@@ -192,6 +217,7 @@ mod tests {
                         color: Rgb::parse("#e8f6ff").unwrap(),
                     },
                     register: None,
+                    on_top: false,
                 },
                 Op::Cast {
                     spread: 2,
@@ -201,6 +227,7 @@ mod tests {
                         color: Rgb::parse("#101020").unwrap(),
                     },
                     register: Some(Register::Braille),
+                    on_top: false,
                 },
             ],
             symbolizer: SymbolizerSpec {
@@ -239,6 +266,7 @@ mod tests {
                     color: Rgb::new(255, 0, 0)
                 },
                 register: None,
+                on_top: false,
             }]
         );
     }

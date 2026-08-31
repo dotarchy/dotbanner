@@ -1,0 +1,24 @@
+{
+  "version": 1,
+  "name": "chrome-stipple",
+  "text": "dotarchy",
+  "font": { "family": "DejaVu Sans", "style": "Bold" },
+  "rows": 10,
+  "pipeline": [
+    {
+      "op": "fill",
+      "kind": "band",
+      "stops": ["#8fd4ff", "#2a6fd6", "#0a2a6e", "#f8fbff", "#e8c98a", "#a8763a", "#5a3a12"],
+      "steps": 14
+    },
+    {
+      "op": "edge",
+      "outer": 1,
+      "inner": 5,
+      "kind": "band",
+      "stops": ["#eaf6ff", "#7fb0e8", "#fff4d8"],
+      "register": "braille",
+      "on_top": true
+    }
+  ]
+}

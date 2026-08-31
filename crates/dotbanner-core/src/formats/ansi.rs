@@ -2,30 +2,40 @@
 
 use crate::symbolizer::CellGrid;
 
-/// Render the grid with 24-bit foreground escapes, resetting at each line's
-/// end. Cells without a foreground print bare.
+/// Render the grid with 24-bit escapes, resetting at each line's end. Each
+/// cell can carry both a foreground (its glyph) and a background (the layer
+/// composited beneath it), so overlapping layers both stay visible.
 pub fn to_ansi(grid: &CellGrid) -> String {
     let mut out = String::new();
     for row in 0..grid.rows() {
-        let mut current: Option<crate::color::Rgb> = None;
+        let mut fg: Option<crate::color::Rgb> = None;
+        let mut bg: Option<crate::color::Rgb> = None;
         for col in 0..grid.cols() {
             let cell = match grid.get(col, row) {
                 Some(c) => c,
                 None => continue,
             };
-            // Blanks carry no ink, so they inherit whatever color is active
-            // rather than forcing a reset — that keeps runs unbroken.
+            // A blank carries no ink, so it inherits the active foreground
+            // rather than forcing a reset — that keeps runs unbroken. Its
+            // background still applies: that is the cell being painted.
             if cell.ch != ' ' {
                 if let Some(rgb) = cell.fg {
-                    if current != Some(rgb) {
+                    if fg != Some(rgb) {
                         out.push_str(&format!("\x1b[38;2;{};{};{}m", rgb.r, rgb.g, rgb.b));
-                        current = Some(rgb);
+                        fg = Some(rgb);
                     }
                 }
             }
+            if cell.bg != bg {
+                match cell.bg {
+                    Some(rgb) => out.push_str(&format!("\x1b[48;2;{};{};{}m", rgb.r, rgb.g, rgb.b)),
+                    None => out.push_str("\x1b[49m"),
+                }
+                bg = cell.bg;
+            }
             out.push(cell.ch);
         }
-        if current.is_some() {
+        if fg.is_some() || bg.is_some() {
             out.push_str("\x1b[0m");
         }
         out.push('\n');
@@ -56,9 +66,41 @@ mod tests {
             mask: Mask::from_sketch("##\n##\n##\n##"),
             paint: Paint::Solid(Rgb::new(255, 0, 0)),
             register: None,
+            on_top: false,
         }];
         let ansi = to_ansi(&symbolize_layers(&layers, SymbolSet::Blocks));
         assert_eq!(ansi, "\x1b[38;2;255;0;0m█\x1b[0m\n");
+    }
+
+    #[test]
+    fn two_layers_share_a_cell_as_foreground_and_background() {
+        use crate::engine::{Layer, Paint};
+        use crate::symbolizer::symbolize_layers;
+        // A braille cast under a block body, contending for one cell: the
+        // body covers more pixels so it draws, the cast fills the background.
+        let layers = vec![
+            Layer {
+                mask: Mask::from_sketch("##\n##\n##\n##"),
+                paint: Paint::Solid(Rgb::new(0, 0, 255)),
+                register: Some(SymbolSet::Braille),
+                on_top: false,
+            },
+            Layer {
+                mask: Mask::from_sketch("##\n##\n##\n##"),
+                paint: Paint::Solid(Rgb::new(255, 0, 0)),
+                register: Some(SymbolSet::Blocks),
+                on_top: false,
+            },
+        ];
+        let grid = symbolize_layers(&layers, SymbolSet::Blocks);
+        let cell = grid.get(0, 0).unwrap();
+        assert_eq!(cell.ch, '█');
+        assert_eq!(cell.fg, Some(Rgb::new(255, 0, 0)));
+        assert_eq!(cell.bg, Some(Rgb::new(0, 0, 255)));
+        assert_eq!(
+            to_ansi(&grid),
+            "\x1b[38;2;255;0;0m\x1b[48;2;0;0;255m█\x1b[0m\n"
+        );
     }
 
     #[test]
@@ -69,6 +111,7 @@ mod tests {
             mask: Mask::from_sketch("##\n##\n##\n##"),
             paint: Paint::Solid(Rgb::new(0, 255, 0)),
             register: Some(SymbolSet::Braille),
+            on_top: false,
         }];
         let ansi = to_ansi(&symbolize_layers(&layers, SymbolSet::Blocks));
         assert_eq!(ansi, "\x1b[38;2;0;255;0m⣿\x1b[0m\n");

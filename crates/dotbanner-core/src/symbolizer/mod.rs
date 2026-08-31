@@ -108,22 +108,41 @@ impl SymbolSet {
     }
 }
 
-/// One terminal cell of symbolized output: the glyph, and the foreground it
-/// paints with (`None` for uncolored/mono sinks).
+/// One terminal cell of symbolized output: the glyph, the foreground it
+/// paints with, and the background behind it.
+///
+/// A cell holds two colors, so two layers can share it: the layer with the
+/// most coverage draws the glyph in `fg`, and the layer beneath it fills
+/// `bg`. That is how a braille glow stays visible where a block body sits on
+/// top of it, instead of being overwritten.
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
     pub fg: Option<crate::color::Rgb>,
+    pub bg: Option<crate::color::Rgb>,
 }
 
 impl Cell {
     pub fn new(ch: char) -> Self {
-        Self { ch, fg: None }
+        Self {
+            ch,
+            fg: None,
+            bg: None,
+        }
     }
 
     pub fn with_fg(ch: char, fg: crate::color::Rgb) -> Self {
-        Self { ch, fg: Some(fg) }
+        Self {
+            ch,
+            fg: Some(fg),
+            bg: None,
+        }
+    }
+
+    pub fn with_bg(mut self, bg: crate::color::Rgb) -> Self {
+        self.bg = Some(bg);
+        self
     }
 }
 
@@ -245,12 +264,15 @@ pub fn symbolize(mask: &Mask, set: SymbolSet) -> CellGrid {
 
 /// Symbolize painted layers into one colored grid.
 ///
-/// The glyph comes from the union of all layers, so a rim and its body
-/// compose into a single cell without a second pass. The cell's color goes
-/// to the layer covering the most pixels within it — a cell that is mostly
-/// body reads as body even when a rim clips its edge. Ties go to the later
-/// layer, preserving draw order. Majority coverage is what keeps a one-pixel
-/// trap from flooding every edge cell.
+/// Each cell is contested by every layer covering it. The layer with the
+/// most covered pixels draws the glyph in its own register and paints the
+/// foreground; ties go to the later layer, preserving draw order. Majority
+/// coverage is what keeps a one-pixel trap from flooding every edge cell.
+///
+/// The runner-up paints the **background**, so two layers share the cell
+/// rather than one erasing the other — a braille glow keeps showing through
+/// where a block body covers it, and both keep their own paint. A layer that
+/// loses every cell it touches still contributes color this way.
 pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet) -> CellGrid {
     // Every register shares this pixel footprint per cell, so a braille cast
     // and a block body can occupy one grid (ADR-201).
@@ -265,10 +287,13 @@ pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet)
     let mut cells = Vec::with_capacity(cols * rows);
     for row in 0..rows {
         for col in 0..cols {
-            // The layer covering the most pixels in this cell owns it: its
-            // register draws the glyph and its paint colors it. Ties go to
-            // the later layer, preserving draw order.
+            // Score every layer's coverage of this cell, keeping the two
+            // best: the winner draws, the runner-up backs it. A layer marked
+            // `on_top` skips the contest and takes the glyph outright,
+            // demoting the best coverage-scored layer to the background.
             let mut owner: Option<(&crate::engine::Layer, usize, usize)> = None;
+            let mut under: Option<(&crate::engine::Layer, usize, usize)> = None;
+            let mut overlay: Option<(&crate::engine::Layer, usize, usize)> = None;
             for layer in layers {
                 let mut sum_y = 0usize;
                 let mut count = 0usize;
@@ -280,24 +305,45 @@ pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet)
                         }
                     }
                 }
-                if count > 0 && owner.map(|(_, best, _)| count >= best).unwrap_or(true) {
-                    owner = Some((layer, count, sum_y));
+                if count == 0 {
+                    continue;
                 }
+                if layer.on_top {
+                    overlay = Some((layer, count, sum_y));
+                    continue;
+                }
+                if owner.map(|(_, best, _)| count >= best).unwrap_or(true) {
+                    under = owner;
+                    owner = Some((layer, count, sum_y));
+                } else if under.map(|(_, second, _)| count >= second).unwrap_or(true) {
+                    under = Some((layer, count, sum_y));
+                }
+            }
+            if let Some(top) = overlay {
+                under = owner.or(under);
+                owner = Some(top);
             }
 
             let Some((layer, count, sum_y)) = owner else {
                 cells.push(Cell::new(' '));
                 continue;
             };
+            let paint_at = |l: &crate::engine::Layer, count: usize, sum_y: usize| {
+                let mid = sum_y as f32 / count as f32;
+                let t = if height > 1 {
+                    mid / (height - 1) as f32
+                } else {
+                    0.0
+                };
+                l.paint.color_at(t)
+            };
             let set = layer.register.unwrap_or(default_set);
             let glyph = cell_glyph(&layer.mask, col, row, set, CELL_W, CELL_H);
-            let mid = sum_y as f32 / count as f32;
-            let t = if height > 1 {
-                mid / (height - 1) as f32
-            } else {
-                0.0
-            };
-            cells.push(Cell::with_fg(glyph, layer.paint.color_at(t)));
+            let mut cell = Cell::with_fg(glyph, paint_at(layer, count, sum_y));
+            if let Some((below, bc, bsum)) = under {
+                cell = cell.with_bg(paint_at(below, bc, bsum));
+            }
+            cells.push(cell);
         }
     }
     CellGrid { cols, rows, cells }

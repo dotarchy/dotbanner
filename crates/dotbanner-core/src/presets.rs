@@ -69,14 +69,17 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
         "plain" => Some(vec![Op::Fill {
             kind: Fill::Solid { color: first },
             register: None,
+            on_top: false,
         }]),
         "band" => Some(vec![Op::Fill {
             kind: banded(colors, Some(10)),
             register: None,
+            on_top: false,
         }]),
         "gradient" => Some(vec![Op::Fill {
             kind: banded(colors, None),
             register: None,
+            on_top: false,
         }]),
         "trap" => Some(trap_pipeline(colors, 1)),
         // The prototype's braille-behind-blocks shadow, native now: a cast
@@ -88,10 +91,12 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
                 dy: 2,
                 kind: Fill::Solid { color: last },
                 register: Some(Register::Braille),
+                on_top: false,
             },
             Op::Fill {
                 kind: banded(colors, None),
                 register: None,
+                on_top: false,
             },
         ]),
         // A centered braille halo: same mechanism, no offset, wider spread.
@@ -102,10 +107,12 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
                 dy: 0,
                 kind: Fill::Solid { color: last },
                 register: Some(Register::Braille),
+                on_top: false,
             },
             Op::Fill {
                 kind: Fill::Solid { color: first },
                 register: None,
+                on_top: false,
             },
         ]),
         // Thick outer outline in the body's own register.
@@ -116,10 +123,48 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
                 dy: 0,
                 kind: Fill::Solid { color: first },
                 register: None,
+                on_top: false,
             },
             Op::Fill {
                 kind: banded(colors, None),
                 register: None,
+                on_top: false,
+            },
+        ]),
+        // Braille stippled over the body: the dots draw on top and the body
+        // colour shows through as the cell background. Close fg/bg values
+        // read as texture rather than as a second shape.
+        "stipple" => Some(vec![
+            Op::Fill {
+                kind: banded(colors, None),
+                register: None,
+                on_top: false,
+            },
+            Op::Edge {
+                outer: 1,
+                inner: 4,
+                kind: Fill::Solid {
+                    color: first.lerp(last, 0.25),
+                },
+                register: Some(Register::Braille),
+                on_top: true,
+            },
+        ]),
+        // A band straddling the letterform edge, fading through the palette
+        // in both directions at once — outward into the ground, inward into
+        // the body.
+        "halo" => Some(vec![
+            Op::Fill {
+                kind: Fill::Solid { color: last },
+                register: None,
+                on_top: false,
+            },
+            Op::Edge {
+                outer: 3,
+                inner: 3,
+                kind: banded(colors, None),
+                register: Some(Register::Braille),
+                on_top: true,
             },
         ]),
         _ => None,
@@ -151,18 +196,20 @@ pub fn trap_pipeline(colors: &[Rgb], width: u32) -> Vec<Op> {
         Op::Fill {
             kind: Fill::Solid { color: core },
             register: None,
+            on_top: false,
         },
         Op::Rim {
             width: width.max(1),
             kind: Fill::Solid { color: rim },
             register: None,
+            on_top: false,
         },
     ]
 }
 
 /// Style names the CLI accepts.
 pub const STYLES: &[&str] = &[
-    "plain", "band", "gradient", "trap", "shadow", "glow", "sticker",
+    "plain", "band", "gradient", "trap", "shadow", "glow", "sticker", "stipple", "halo",
 ];
 
 #[cfg(test)]
