@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 
 mod style;
+mod tui;
 use style::{bad, cmd, heading, hint, name, quoted};
 
 use dotbanner_core::{
@@ -55,6 +56,8 @@ enum Command {
     Render(RenderArgs),
     /// Print the recipe a set of flags produces, without rendering
     Recipe(RenderArgs),
+    /// Edit a recipe interactively, with a live preview
+    Tui(RenderArgs),
     /// Show what's available: styles, gradients, fonts, registers
     Show {
         /// styles | gradients | fonts | registers  (omit to list the topics)
@@ -532,11 +535,48 @@ fn run() -> Result<String, String> {
         None => Ok(overview()),
         Some(Command::Render(args)) => render(args),
         Some(Command::Recipe(args)) => Ok(build_recipe(args)?.to_json() + "\n"),
+        Some(Command::Tui(args)) => run_tui(args),
         Some(Command::Show { what, text }) => match what.as_deref() {
             None => Ok(show_topics()),
             Some(w) => show(w, text.as_deref()),
         },
     }
+}
+
+/// Build the starting document from the same flags `render` takes, then
+/// hand the screen to the editor. Stdin recipes are refused: the terminal
+/// the TUI reads keys from is the terminal "-" would consume.
+fn run_tui(args: &RenderArgs) -> Result<String, String> {
+    if args.recipe.as_deref() == Some("-") {
+        return Err("the editor cannot read a recipe from stdin — pass a file path".into());
+    }
+    let mut args = args.clone();
+    if args.text.is_none() && args.recipe.is_none() {
+        args.text = Some("dotbanner".into());
+    }
+    let recipe = build_recipe(&args)?;
+    let path = args
+        .recipe
+        .clone()
+        .unwrap_or_else(|| "banner.json".to_string());
+    // A loaded file's pipeline is its own: `build_recipe` ignores the
+    // style/colors/weight flags when `--recipe` is given, so claiming those
+    // flag defaults described it would let one weight nudge replace it.
+    let style = if args.recipe.is_some() {
+        None
+    } else {
+        Some(args.style.clone())
+    };
+    let mut app = tui::App::new(
+        recipe,
+        path,
+        args.recipe.is_some(),
+        style,
+        args.colors.clone(),
+        args.weight,
+    );
+    ratatui::run(|terminal| tui::run(&mut app, terminal)).map_err(|e| e.to_string())?;
+    Ok(String::new())
 }
 
 /// `show` with no topic lists the topics rather than erroring.
