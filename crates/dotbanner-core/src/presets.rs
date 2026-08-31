@@ -24,8 +24,19 @@ pub fn resolve_colors(spec: &str) -> Option<Vec<Rgb>> {
         .filter(|v| !v.is_empty())
 }
 
-/// The pipeline for a named style, given resolved colors.
+/// How thick a style's edge treatment is, in mask pixels. Each style spends
+/// it on whatever edge it has — a rim's width, a cast's spread, an edge
+/// band's reach — so one knob means "how strong is the effect" across all
+/// of them.
+pub const DEFAULT_WEIGHT: u32 = 1;
+
+/// The pipeline for a named style at the default weight.
 pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
+    style_pipeline_weighted(style, colors, DEFAULT_WEIGHT)
+}
+
+/// The pipeline for a named style, given resolved colors and a weight.
+pub fn style_pipeline_weighted(style: &str, colors: &[Rgb], weight: u32) -> Option<Vec<Op>> {
     let first = colors
         .first()
         .copied()
@@ -50,14 +61,14 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
             register: None,
             on_top: false,
         }]),
-        "trap" => Some(trap_pipeline(colors, 1)),
+        "trap" => Some(trap_pipeline(colors, weight)),
         // The prototype's braille-behind-blocks shadow, native now: a cast
         // offset down-right in braille, under a gradient body.
         "shadow" => Some(vec![
             Op::Cast {
-                spread: 1,
-                dx: 2,
-                dy: 2,
+                spread: weight,
+                dx: 2 * weight as i32,
+                dy: 2 * weight as i32,
                 kind: Fill::Solid { color: last },
                 register: Some(Register::Braille),
                 on_top: false,
@@ -72,7 +83,7 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
         // A centered braille halo: same mechanism, no offset, wider spread.
         "glow" => Some(vec![
             Op::Cast {
-                spread: 3,
+                spread: 3 * weight,
                 dx: 0,
                 dy: 0,
                 kind: Fill::Solid { color: last },
@@ -89,7 +100,7 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
         // Thick outer outline in the body's own register.
         "sticker" => Some(vec![
             Op::Cast {
-                spread: 3,
+                spread: 3 * weight,
                 dx: 0,
                 dy: 0,
                 kind: Fill::Solid { color: first },
@@ -114,8 +125,8 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
                 on_top: false,
             },
             Op::Edge {
-                outer: 1,
-                inner: 4,
+                outer: weight,
+                inner: 4 * weight,
                 kind: Fill::Solid {
                     color: first.lerp(last, 0.25),
                 },
@@ -134,8 +145,8 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
                 on_top: false,
             },
             Op::Edge {
-                outer: 3,
-                inner: 3,
+                outer: 3 * weight,
+                inner: 3 * weight,
                 kind: banded(colors, None),
                 register: Some(Register::Braille),
                 on_top: true,
@@ -210,6 +221,20 @@ mod tests {
             vec![Rgb::new(255, 0, 0), Rgb::new(0, 255, 0)]
         );
         assert!(resolve_colors("not-a-color").is_none());
+    }
+
+    #[test]
+    fn weight_thickens_every_style_that_has_an_edge() {
+        let colors = gradient("omarchy").unwrap();
+        for style in STYLES {
+            let thin = style_pipeline_weighted(style, &colors, 1).unwrap();
+            let thick = style_pipeline_weighted(style, &colors, 3).unwrap();
+            if *style == "plain" || *style == "band" || *style == "gradient" {
+                assert_eq!(thin, thick, "{style} has no edge to thicken");
+            } else {
+                assert_ne!(thin, thick, "{style} should respond to weight");
+            }
+        }
     }
 
     #[test]

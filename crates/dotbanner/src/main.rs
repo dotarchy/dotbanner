@@ -83,19 +83,18 @@ struct RenderArgs {
     /// Space between glyphs as a fraction of the em (0 for none)
     #[arg(long, value_name = "EM")]
     tracking: Option<f32>,
-    /// Effect style: plain, band, gradient, trap
+    /// Effect style; see: dotbanner show styles
     #[arg(short = 's', long, default_value = "plain")]
     style: String,
-    /// Gradient preset name or comma-separated hex colors
+    /// Palette name or comma-separated hex colors; see: dotbanner show colors
     #[arg(short, long, default_value = "omarchy")]
     colors: String,
-    /// Render with braille instead of block glyphs
-    #[arg(long)]
-    dots: bool,
-    /// Trap rim width in mask pixels (2 px = 1 block row, 4 px = 1 braille
-    /// row, so 1 is a subpixel trap)
-    #[arg(long, default_value_t = 1)]
-    trap_width: u32,
+    /// Glyph repertoire: blocks, braille, sextants, facets
+    #[arg(long, value_name = "REGISTER")]
+    register: Option<String>,
+    /// How thick the style's edge treatment is, in mask pixels
+    #[arg(long, default_value_t = presets::DEFAULT_WEIGHT)]
+    weight: u32,
     /// Load a recipe JSON file ("-" for stdin); flags override its fields
     #[arg(long)]
     recipe: Option<String>,
@@ -123,16 +122,16 @@ fn build_recipe(args: &RenderArgs) -> Result<Recipe, String> {
             let mut r = Recipe::new(text);
             let colors = presets::resolve_colors(&args.colors)
                 .ok_or_else(|| format!("unknown gradient or bad colors: {}", args.colors))?;
-            let ops = if args.style == "trap" {
-                presets::trap_pipeline(&colors, args.trap_width)
-            } else {
-                presets::style_pipeline(&args.style, &colors).ok_or_else(|| {
-                    format!(
-                        "unknown style '{}' (try: {})",
-                        args.style,
-                        presets::STYLES.join(", ")
-                    )
-                })?
+            let ops = {
+                presets::style_pipeline_weighted(&args.style, &colors, args.weight).ok_or_else(
+                    || {
+                        format!(
+                            "unknown style '{}' (try: {})",
+                            args.style,
+                            presets::STYLES.join(", ")
+                        )
+                    },
+                )?
             };
             r.pipeline = ops.into_iter().map(Into::into).collect();
             r
@@ -166,10 +165,21 @@ fn build_recipe(args: &RenderArgs) -> Result<Recipe, String> {
     if let Some(t) = args.tracking {
         recipe.size.tracking = t;
     }
-    if args.dots {
-        recipe.symbolizer = SymbolizerSpec {
-            body: Register::Braille,
+    if let Some(r) = &args.register {
+        let body = match r.as_str() {
+            "blocks" => Register::Blocks,
+            "braille" | "dots" => Register::Braille,
+            "sextants" => Register::Sextants,
+            "facets" => Register::Facets,
+            other => {
+                return Err(format!(
+                    "unknown register '{other}'\n  {} {}",
+                    hint("the four this build draws with:"),
+                    cmd("dotbanner show registers"),
+                ))
+            }
         };
+        recipe.symbolizer = SymbolizerSpec { body };
     }
     Ok(recipe)
 }
@@ -296,8 +306,8 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
                     rows: 7,
                     style: (*style).into(),
                     colors: "omarchy".into(),
-                    dots: false,
-                    trap_width: 1,
+                    register: None,
+                    weight: presets::DEFAULT_WEIGHT,
                     fit: Some("terminal".into()),
                     tracking: None,
                     recipe: None,
@@ -365,8 +375,8 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
                     rows: 6,
                     style: "band".into(),
                     colors: g.name.clone(),
-                    dots: false,
-                    trap_width: 1,
+                    register: None,
+                    weight: presets::DEFAULT_WEIGHT,
                     fit: Some("terminal".into()),
                     tracking: None,
                     recipe: None,
@@ -482,6 +492,13 @@ fn hint_for(err: &clap::Error) -> Option<String> {
         )
     } else if mentions("--style") || mentions("-s") {
         ("every style, rendered:", "dotbanner show styles")
+    } else if mentions("--register") {
+        ("the four registers:", "dotbanner show registers")
+    } else if mentions("--weight") {
+        (
+            "how thick an edge treatment is, in mask pixels:",
+            "dotbanner show styles",
+        )
     } else if mentions("--colors") || mentions("-c") {
         ("every colour preset, rendered:", "dotbanner show colors")
     } else if mentions("--recipe") {
