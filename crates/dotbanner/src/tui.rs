@@ -8,6 +8,7 @@
 //! the panel shows is what `render` will print.
 
 use std::io;
+use std::time::{Duration, Instant};
 
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -127,6 +128,10 @@ pub struct App {
     status: String,
     /// Set when the document changed since the preview was last rendered.
     dirty: bool,
+    /// When the pending render may run. Each change pushes it a cooldown
+    /// ahead, so a held key scrolls the panel freely and the engine runs
+    /// once, when the input pauses.
+    render_after: Instant,
     preview: Result<CellGrid, String>,
     /// The serialized document as last saved (or as opened), so quitting
     /// can tell edits-with-a-home from edits-without.
@@ -147,6 +152,10 @@ enum Pending {
     Quit,
     Save,
 }
+
+/// How long input must pause before a pending render runs. Above a key's
+/// autorepeat interval, below what a hand notices on a single press.
+const RENDER_COOLDOWN: Duration = Duration::from_millis(150);
 
 impl App {
     /// `style: None` marks a document opened from a file: its pipeline is
@@ -193,7 +202,9 @@ impl App {
             font_sel: 0,
             font_entry: Font::default(),
             status: String::new(),
+            // Due already: the opening frame renders without a cooldown.
             dirty: true,
+            render_after: Instant::now(),
             preview: Err("rendering…".into()),
             notice: notices.join(" · "),
             pending: Pending::None,
@@ -203,6 +214,14 @@ impl App {
 
     fn focused(&self) -> Control {
         CONTROLS[self.focus]
+    }
+
+    /// The document changed: re-render once input pauses for the cooldown.
+    /// Every change pushes the deadline anew, so a scroll or a held slider
+    /// moves the panel per keystroke and costs one render at its end.
+    fn mark_changed(&mut self) {
+        self.dirty = true;
+        self.render_after = Instant::now() + RENDER_COOLDOWN;
     }
 
     /// Rebuild the pipeline from the style/colors/weight controls. Stages
@@ -230,7 +249,7 @@ impl App {
             .cloned()
             .collect();
         self.recipe.pipeline = ops.into_iter().map(Into::into).chain(unknown).collect();
-        self.dirty = true;
+        self.mark_changed();
     }
 
     /// Move a selector or slider by `delta` steps.
@@ -251,7 +270,7 @@ impl App {
                 // A face name is per family; carrying one across families
                 // would ask the next font for a style it may not have.
                 self.recipe.font.style = None;
-                self.dirty = true;
+                self.mark_changed();
             }
             Control::Style => {
                 // Leaving "custom" is the one deliberate act that hands the
@@ -286,12 +305,12 @@ impl App {
                     .position(|r| *r == self.recipe.symbolizer.body)
                     .unwrap_or(0);
                 self.recipe.symbolizer.body = REGISTERS[cycle(at, REGISTERS.len(), delta)].clone();
-                self.dirty = true;
+                self.mark_changed();
             }
             Control::Rows => {
                 let rows = self.recipe.size.rows as i64 + delta;
                 self.recipe.size.rows = rows.clamp(1, 64) as usize;
-                self.dirty = true;
+                self.mark_changed();
             }
             Control::Weight => {
                 if self.style.is_none() {
@@ -308,7 +327,7 @@ impl App {
                 // noise in the saved JSON.
                 let t = self.recipe.size.tracking + delta as f32 * 0.01;
                 self.recipe.size.tracking = (t.clamp(0.0, 0.5) * 100.0).round() / 100.0;
-                self.dirty = true;
+                self.mark_changed();
             }
         }
     }
@@ -348,7 +367,7 @@ impl App {
             self.recipe.font.family = family;
             // A face name is per family (see the font control).
             self.recipe.font.style = None;
-            self.dirty = true;
+            self.mark_changed();
         }
     }
 
@@ -455,7 +474,7 @@ impl App {
                 KeyCode::Esc => {
                     if self.recipe.font != self.font_entry {
                         self.recipe.font = self.font_entry.clone();
-                        self.dirty = true;
+                        self.mark_changed();
                     }
                     self.view = View::Recipe;
                 }
@@ -494,7 +513,7 @@ impl App {
                         if self.focused() == Control::Path {
                             self.own_file = false;
                         }
-                        self.dirty = true;
+                        self.mark_changed();
                     }
                 }
                 // A chorded character is a command that means nothing here,
@@ -510,7 +529,7 @@ impl App {
                         if self.focused() == Control::Path {
                             self.own_file = false;
                         }
-                        self.dirty = true;
+                        self.mark_changed();
                     }
                 }
                 _ => {}
@@ -539,7 +558,7 @@ impl App {
     /// at the document's own size — fitting the pane is the wrap's job in
     /// `grid_text` — so the grid is exactly what `render` would print.
     fn refresh_preview(&mut self) {
-        if !self.dirty {
+        if !self.dirty || Instant::now() < self.render_after {
             return;
         }
         self.dirty = false;
@@ -716,10 +735,13 @@ fn draw(app: &mut App, frame: &mut Frame) {
         Ok(grid) => band_count(grid.cols(), inner.width as usize),
         Err(_) => 1,
     };
+    // While a render waits out the cooldown the pane shows the last grid;
+    // the ellipsis says so.
+    let pending = if app.dirty { "… " } else { " " };
     let title = if bands > 1 {
-        format!(" preview · wrapped ×{bands} ")
+        format!(" preview · wrapped ×{bands}{pending}")
     } else {
-        " preview ".to_string()
+        format!(" preview{pending}")
     };
     frame.render_widget(Block::default().borders(Borders::ALL).title(title), preview);
     match &app.preview {
@@ -778,7 +800,7 @@ fn handle(app: &mut App, event: Event) {
             app.on_key(key.code, key.modifiers);
         }
         // A recipe with `fit: terminal` measures at render time.
-        Event::Resize(..) => app.dirty = true,
+        Event::Resize(..) => app.mark_changed(),
         _ => {}
     }
 }
@@ -786,12 +808,22 @@ fn handle(app: &mut App, event: Event) {
 pub fn run(app: &mut App, terminal: &mut DefaultTerminal) -> io::Result<()> {
     while !app.quit {
         terminal.draw(|frame| draw(app, frame))?;
-        // Block for the first event, then drain whatever arrived while the
-        // frame rendered: a typing burst costs one render at its end, not
-        // one per key queued behind the last.
-        handle(app, event::read()?);
-        while !app.quit && event::poll(std::time::Duration::ZERO)? {
+        // Wait for the next event — or, when a render is pending, only
+        // until its cooldown expires, so the pause in the input is itself
+        // what triggers the render. Each frame drains every queued event
+        // before drawing again.
+        let wait = if app.dirty {
+            app.render_after
+                .saturating_duration_since(Instant::now())
+                .max(Duration::from_millis(1))
+        } else {
+            Duration::from_secs(3600)
+        };
+        if event::poll(wait)? {
             handle(app, event::read()?);
+            while !app.quit && event::poll(Duration::ZERO)? {
+                handle(app, event::read()?);
+            }
         }
     }
     Ok(())
@@ -1061,6 +1093,27 @@ mod tests {
             app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
         }
         assert_eq!(app.recipe.font.family, family);
+    }
+
+    #[test]
+    fn a_change_renders_only_after_the_cooldown() {
+        let mut app = app_with(Recipe::new("hi"));
+        // The opening render is due immediately.
+        app.refresh_preview();
+        assert!(!app.dirty);
+
+        app.on_key(KeyCode::Down, KeyModifiers::NONE);
+        assert!(!app.dirty, "a focus move does not touch the document");
+
+        focus_on(&mut app, Control::Rows);
+        app.adjust(1);
+        assert!(app.dirty);
+        app.refresh_preview();
+        assert!(app.dirty, "within the cooldown the render waits");
+
+        app.render_after = Instant::now() - Duration::from_millis(1);
+        app.refresh_preview();
+        assert!(!app.dirty, "past the deadline the render runs");
     }
 
     #[test]
