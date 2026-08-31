@@ -10,6 +10,7 @@ pub mod engine;
 pub mod formats;
 pub mod presets;
 pub mod recipe;
+pub mod scheme;
 pub mod symbolizer;
 
 use recipe::{Recipe, Register};

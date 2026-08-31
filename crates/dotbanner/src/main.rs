@@ -9,10 +9,12 @@ mod style;
 use style::{bad, cmd, heading, hint, name, quoted};
 
 use dotbanner_core::{
+    color::Rgb,
     engine,
     formats::ansi,
     presets,
     recipe::{Fit, Font, Recipe, Register, SymbolizerSpec},
+    scheme,
 };
 
 /// The three-rung model, rendered with the chrome roles. Built at run time
@@ -240,8 +242,56 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
                 out.push_str(&render(&args)?);
             }
         }
-        "gradients" => {
+        "gradients" if text.is_none() => {
+            // No sample text: show every palette as a compact swatch rather
+            // than a screen of banners. The grammar goes first, since the
+            // named set is a convenience and any hex list is valid.
+            out.push_str(&format!(
+                "{}\n  {}  {}\n  {}  {}\n  {}  {}\n\n",
+                heading("--colors accepts"),
+                name("a hex list "),
+                hint("--colors \"#f8ffff,#3f7fe8,#8a2fc8\"   any length, top to bottom"),
+                name("a preset   "),
+                hint("--colors fire                     named below"),
+                name("a scheme   "),
+                hint("--colors monokai                  any base16 file you install"),
+            ));
+            out.push_str(&format!("{}\n", heading("presets")));
             for g in presets::GRADIENTS {
+                let stops: Vec<Rgb> = presets::gradient(g.name).unwrap_or_default();
+                out.push_str(&format!("  {}{}\n", name(&pad(g.name, 18)), swatch(&stops)));
+            }
+            out.push_str(&format!("\n{}\n", heading("schemes")));
+            for g in presets::SCHEMES {
+                let stops: Vec<Rgb> = presets::gradient(g.name).unwrap_or_default();
+                out.push_str(&format!("  {}{}\n", name(&pad(g.name, 18)), swatch(&stops)));
+            }
+            let installed = scheme::installed();
+            if !installed.is_empty() {
+                out.push_str(&format!("\n{}\n", heading("installed (base16)")));
+                for s in &installed {
+                    out.push_str(&format!(
+                        "  {}{}\n",
+                        name(&pad(&s.name, 18)),
+                        swatch(&s.ramp())
+                    ));
+                }
+            }
+            out.push_str(&format!(
+                "\n{}\n{}\n{}\n",
+                hint("Render one:  dotbanner render \"text\" --colors monokai"),
+                hint("See them rendered:  dotbanner show colors \"text\""),
+                hint(&format!(
+                    "Install more: drop base16 .yaml or .json into {}",
+                    scheme::scheme_dirs()
+                        .first()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                )),
+            ));
+        }
+        "gradients" => {
+            for g in presets::all_presets() {
                 out.push_str(&format!("\n{}\n", hint(&format!("──── {}", g.name))));
                 let args = RenderArgs {
                     text: Some(sample.to_string()),
@@ -404,6 +454,41 @@ fn run() -> Result<String, String> {
 }
 
 /// `show` with no topic lists the topics rather than erroring.
+/// Pad to a column width before styling: escape sequences count toward a
+/// format width but occupy no columns.
+fn pad(text: &str, width: usize) -> String {
+    format!("{text:<width$}")
+}
+
+/// A continuous bar of a ramp's colours, so a palette reads at a glance
+/// without rendering a whole banner.
+fn swatch(stops: &[Rgb]) -> String {
+    use dotbanner_core::engine::Paint;
+    if stops.is_empty() {
+        return String::new();
+    }
+    const WIDTH: usize = 32;
+    let paint = Paint::Bands {
+        stops: stops.to_vec(),
+        steps: None,
+    };
+    if !style::colored() {
+        // Without colour a bar says nothing; list the stops instead.
+        return stops
+            .iter()
+            .map(|c| c.to_hex())
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    (0..WIDTH)
+        .map(|i| {
+            let c = paint.color_at(i as f32 / (WIDTH - 1) as f32);
+            format!("\x1b[38;2;{};{};{}m█", c.r, c.g, c.b)
+        })
+        .collect::<String>()
+        + "\x1b[0m"
+}
+
 fn show_topics() -> String {
     format!(
         "{} <topic>\n\n  {}  every effect, rendered        {}\n  {}  every colour preset, rendered {}\n  \

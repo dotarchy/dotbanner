@@ -37,9 +37,60 @@ pub const GRADIENTS: &[Gradient] = &[
     },
 ];
 
+/// Palettes borrowed from the editor and terminal themes people already run,
+/// so a banner can match the rest of a setup. Each is an ordered ramp
+/// through the theme's signature colours rather than its full palette.
+pub const SCHEMES: &[Gradient] = &[
+    Gradient {
+        name: "monokai",
+        stops: &["#f92672", "#fd971f", "#e6db74", "#a6e22e", "#66d9ef"],
+    },
+    Gradient {
+        name: "gruvbox",
+        stops: &["#fbf1c7", "#fabd2f", "#fe8019", "#cc241d", "#282828"],
+    },
+    Gradient {
+        name: "nord",
+        stops: &["#eceff4", "#88c0d0", "#81a1c1", "#5e81ac", "#2e3440"],
+    },
+    Gradient {
+        name: "dracula",
+        stops: &["#f8f8f2", "#8be9fd", "#bd93f9", "#ff79c6", "#282a36"],
+    },
+    Gradient {
+        name: "catppuccin",
+        stops: &["#cdd6f4", "#89b4fa", "#cba6f7", "#f5c2e7", "#1e1e2e"],
+    },
+    Gradient {
+        name: "tokyo-night",
+        stops: &["#c0caf5", "#7dcfff", "#7aa2f7", "#bb9af7", "#1a1b26"],
+    },
+    Gradient {
+        name: "solarized",
+        stops: &["#fdf6e3", "#b58900", "#cb4b16", "#268bd2", "#002b36"],
+    },
+    Gradient {
+        name: "everforest",
+        stops: &["#d3c6aa", "#a7c080", "#83c092", "#7fbbb3", "#2d353b"],
+    },
+    Gradient {
+        name: "rose-pine",
+        stops: &["#e0def4", "#ebbcba", "#eb6f92", "#c4a7e7", "#191724"],
+    },
+    Gradient {
+        name: "kanagawa",
+        stops: &["#dcd7ba", "#7e9cd8", "#957fb8", "#ffa066", "#1f1f28"],
+    },
+];
+
+/// Every named palette: the designed ramps first, then the theme schemes.
+pub fn all_presets() -> impl Iterator<Item = &'static Gradient> {
+    GRADIENTS.iter().chain(SCHEMES.iter())
+}
+
 /// Look a gradient up by name, returning its parsed stops.
 pub fn gradient(name: &str) -> Option<Vec<Rgb>> {
-    GRADIENTS.iter().find(|g| g.name == name).map(|g| {
+    all_presets().find(|g| g.name == name).map(|g| {
         g.stops
             .iter()
             .map(|s| Rgb::parse(s).expect("built-in gradients are valid hex"))
@@ -51,6 +102,11 @@ pub fn gradient(name: &str) -> Option<Vec<Rgb>> {
 pub fn resolve_colors(spec: &str) -> Option<Vec<Rgb>> {
     if let Some(stops) = gradient(spec) {
         return Some(stops);
+    }
+    // Any base16 scheme on disk resolves by name too, so a banner can match
+    // the theme the rest of a setup already runs.
+    if let Some(scheme) = crate::scheme::find(spec) {
+        return Some(scheme.ramp());
     }
     spec.split(',')
         .map(|s| Rgb::parse(s.trim()).ok())
@@ -227,10 +283,25 @@ mod tests {
 
     #[test]
     fn every_builtin_gradient_parses() {
-        for g in GRADIENTS {
+        for g in all_presets() {
             let stops = gradient(g.name).expect("named gradient resolves");
             assert_eq!(stops.len(), g.stops.len());
         }
+    }
+
+    #[test]
+    fn preset_names_are_unique() {
+        let mut names: Vec<&str> = all_presets().map(|g| g.name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "two presets share a name");
+    }
+
+    #[test]
+    fn schemes_resolve_like_gradients() {
+        assert_eq!(resolve_colors("monokai").unwrap().len(), 5);
+        assert_eq!(resolve_colors("tokyo-night").unwrap().len(), 5);
     }
 
     #[test]
