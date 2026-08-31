@@ -251,61 +251,91 @@ pub fn symbolize(mask: &Mask, set: SymbolSet) -> CellGrid {
 /// body reads as body even when a rim clips its edge. Ties go to the later
 /// layer, preserving draw order. Majority coverage is what keeps a one-pixel
 /// trap from flooding every edge cell.
-pub fn symbolize_layers(layers: &[crate::engine::Layer], set: SymbolSet) -> CellGrid {
+pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet) -> CellGrid {
+    // Every register shares this pixel footprint per cell, so a braille cast
+    // and a block body can occupy one grid (ADR-201).
+    const CELL_W: usize = 2;
+    const CELL_H: usize = 4;
+
     let width = layers.iter().map(|l| l.mask.width()).max().unwrap_or(0);
     let height = layers.iter().map(|l| l.mask.height()).max().unwrap_or(0);
-    let mut union = Mask::new(width, height);
-    for layer in layers {
-        for y in 0..layer.mask.height() {
-            for x in 0..layer.mask.width() {
-                if layer.mask.get(x, y) {
-                    union.set(x, y, true);
-                }
-            }
-        }
-    }
+    let cols = width.div_ceil(CELL_W);
+    let rows = height.div_ceil(CELL_H);
 
-    let (cw, ch) = set.cell_size();
-    let grid = symbolize(&union, set);
-    let mut cells = Vec::with_capacity(grid.cols() * grid.rows());
-    for row in 0..grid.rows() {
-        for col in 0..grid.cols() {
-            let glyph = grid.get(col, row).map(|c| c.ch).unwrap_or(' ');
-            let mut fg = None;
-            let mut best = 0usize;
+    let mut cells = Vec::with_capacity(cols * rows);
+    for row in 0..rows {
+        for col in 0..cols {
+            // The layer covering the most pixels in this cell owns it: its
+            // register draws the glyph and its paint colors it. Ties go to
+            // the later layer, preserving draw order.
+            let mut owner: Option<(&crate::engine::Layer, usize, usize)> = None;
             for layer in layers {
                 let mut sum_y = 0usize;
                 let mut count = 0usize;
-                for dy in 0..ch {
-                    for dx in 0..cw {
-                        let (x, y) = (col * cw + dx, row * ch + dy);
-                        if layer.mask.get(x, y) {
-                            sum_y += y;
+                for dy in 0..CELL_H {
+                    for dx in 0..CELL_W {
+                        if layer.mask.get(col * CELL_W + dx, row * CELL_H + dy) {
+                            sum_y += row * CELL_H + dy;
                             count += 1;
                         }
                     }
                 }
-                if count >= best && count > 0 {
-                    best = count;
-                    let mid = sum_y as f32 / count as f32;
-                    let t = if height > 1 {
-                        mid / (height - 1) as f32
-                    } else {
-                        0.0
-                    };
-                    fg = Some(layer.paint.color_at(t));
+                if count > 0 && owner.map(|(_, best, _)| count >= best).unwrap_or(true) {
+                    owner = Some((layer, count, sum_y));
                 }
             }
-            cells.push(match fg {
-                Some(c) => Cell::with_fg(glyph, c),
-                None => Cell::new(glyph),
-            });
+
+            let Some((layer, count, sum_y)) = owner else {
+                cells.push(Cell::new(' '));
+                continue;
+            };
+            let set = layer.register.unwrap_or(default_set);
+            let glyph = cell_glyph(&layer.mask, col, row, set, CELL_W, CELL_H);
+            let mid = sum_y as f32 / count as f32;
+            let t = if height > 1 {
+                mid / (height - 1) as f32
+            } else {
+                0.0
+            };
+            cells.push(Cell::with_fg(glyph, layer.paint.color_at(t)));
         }
     }
-    CellGrid {
-        cols: grid.cols(),
-        rows: grid.rows(),
-        cells,
+    CellGrid { cols, rows, cells }
+}
+
+/// The glyph for one cell of a layer's mask, in the given register. Blocks
+/// downsample the shared 2×4 footprint into quadrants — a quadrant is set
+/// when either of its two pixel rows is.
+fn cell_glyph(
+    mask: &Mask,
+    col: usize,
+    row: usize,
+    set: SymbolSet,
+    cell_w: usize,
+    cell_h: usize,
+) -> char {
+    let (x0, y0) = (col * cell_w, row * cell_h);
+    match set {
+        SymbolSet::Braille => {
+            let mut sub = Mask::new(2, 4);
+            for dy in 0..4 {
+                for dx in 0..2 {
+                    sub.set(dx, dy, mask.get(x0 + dx, y0 + dy));
+                }
+            }
+            braille_char(&sub, 0, 0)
+        }
+        SymbolSet::Blocks => {
+            let mut sub = Mask::new(2, 2);
+            for qy in 0..2 {
+                for qx in 0..2 {
+                    let on =
+                        (0..cell_h / 2).any(|dy| mask.get(x0 + qx, y0 + qy * (cell_h / 2) + dy));
+                    sub.set(qx, qy, on);
+                }
+            }
+            quad_char(&sub, 0, 0)
+        }
     }
 }
 

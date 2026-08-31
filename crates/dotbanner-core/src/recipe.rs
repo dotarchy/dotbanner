@@ -51,6 +51,7 @@ impl Recipe {
                 kind: Fill::Solid {
                     color: Rgb::new(0xff, 0xff, 0xff),
                 },
+                register: None,
             }],
             symbolizer: SymbolizerSpec::default(),
         }
@@ -81,7 +82,8 @@ impl Default for Font {
     }
 }
 
-/// A pipeline stage. Every named style is a composition of these (ADR-300).
+/// A pipeline stage: a region, a paint, and optionally its own symbol
+/// register (ADR-201).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum Op {
@@ -89,17 +91,37 @@ pub enum Op {
     Fill {
         #[serde(flatten)]
         kind: Fill,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        register: Option<Register>,
     },
-    /// Paint an eroded edge band in its own color.
+    /// Paint an inner edge band: the body minus its eroded core. `width` is
+    /// in mask pixels, so values below one cell are subpixel traps.
     Rim {
-        #[serde(default = "default_erode")]
-        erode: u32,
-        color: Rgb,
+        #[serde(default = "default_width", alias = "erode")]
+        width: u32,
+        #[serde(flatten)]
+        kind: Fill,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        register: Option<Register>,
+    },
+    /// Paint outside the body: the glyph dilated by `spread` and offset by
+    /// (`dx`, `dy`), minus the body itself — a drop shadow, outline, or glow.
+    Cast {
+        #[serde(default = "default_width")]
+        spread: u32,
+        #[serde(default)]
+        dx: i32,
+        #[serde(default)]
+        dy: i32,
+        #[serde(flatten)]
+        kind: Fill,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        register: Option<Register>,
     },
 }
 
-fn default_erode() -> u32 {
-    2
+fn default_width() -> u32 {
+    1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,10 +184,23 @@ mod tests {
                         ],
                         steps: Some(10),
                     },
+                    register: None,
                 },
                 Op::Rim {
-                    erode: 5,
-                    color: Rgb::parse("#e8f6ff").unwrap(),
+                    width: 5,
+                    kind: Fill::Solid {
+                        color: Rgb::parse("#e8f6ff").unwrap(),
+                    },
+                    register: None,
+                },
+                Op::Cast {
+                    spread: 2,
+                    dx: 2,
+                    dy: 2,
+                    kind: Fill::Solid {
+                        color: Rgb::parse("#101020").unwrap(),
+                    },
+                    register: Some(Register::Braille),
                 },
             ],
             symbolizer: SymbolizerSpec {
@@ -202,8 +237,35 @@ mod tests {
             vec![Op::Fill {
                 kind: Fill::Solid {
                     color: Rgb::new(255, 0, 0)
-                }
+                },
+                register: None,
             }]
         );
+    }
+
+    #[test]
+    fn rim_accepts_the_legacy_erode_alias() {
+        // The field was named `erode` before ADR-201 renamed it `width`.
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"rim","erode":3,"kind":"solid","color":"#ffffff"}]}"##;
+        let r = Recipe::from_json(json).unwrap();
+        assert!(matches!(r.pipeline[0], Op::Rim { width: 3, .. }));
+    }
+
+    #[test]
+    fn cast_defaults_to_no_offset() {
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"cast","kind":"solid","color":"#000000","register":"braille"}]}"##;
+        let r = Recipe::from_json(json).unwrap();
+        assert!(matches!(
+            r.pipeline[0],
+            Op::Cast {
+                spread: 1,
+                dx: 0,
+                dy: 0,
+                register: Some(Register::Braille),
+                ..
+            }
+        ));
     }
 }

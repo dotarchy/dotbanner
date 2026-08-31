@@ -50,11 +50,27 @@ mod tests {
     fn colored_cells_emit_and_reset() {
         use crate::engine::{Layer, Paint};
         use crate::symbolizer::symbolize_layers;
+        // Layers share a 2×4 cell footprint (ADR-201), so a full cell is
+        // four rows tall.
         let layers = vec![Layer {
-            mask: Mask::from_sketch("##\n##"),
+            mask: Mask::from_sketch("##\n##\n##\n##"),
             paint: Paint::Solid(Rgb::new(255, 0, 0)),
+            register: None,
         }];
         let ansi = to_ansi(&symbolize_layers(&layers, SymbolSet::Blocks));
         assert_eq!(ansi, "\x1b[38;2;255;0;0m█\x1b[0m\n");
+    }
+
+    #[test]
+    fn a_braille_layer_draws_in_its_own_register() {
+        use crate::engine::{Layer, Paint};
+        use crate::symbolizer::symbolize_layers;
+        let layers = vec![Layer {
+            mask: Mask::from_sketch("##\n##\n##\n##"),
+            paint: Paint::Solid(Rgb::new(0, 255, 0)),
+            register: Some(SymbolSet::Braille),
+        }];
+        let ansi = to_ansi(&symbolize_layers(&layers, SymbolSet::Blocks));
+        assert_eq!(ansi, "\x1b[38;2;0;255;0m⣿\x1b[0m\n");
     }
 }

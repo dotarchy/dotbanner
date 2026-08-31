@@ -28,6 +28,7 @@ _The recipe JSON contract — schema, presets, compatibility_
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-200](./recipe/ADR-200-recipe-json-as-the-canonical-pipeline-document.md) | Recipe JSON as the canonical pipeline document | Proposed |
+| [ADR-201](./recipe/ADR-201-pipeline-op-vocabulary-fill-rim-cast-with-paints-and-registers.md) | Pipeline op vocabulary — fill, rim, cast with paints and registers | Accepted |
 
 ## Engine
 _Rasterization, image-space effects, the pipeline model_

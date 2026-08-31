@@ -2,7 +2,7 @@
 //! recipes). These seed `presets/` on disk and back the CLI's named styles.
 
 use crate::color::Rgb;
-use crate::recipe::{Fill, Op};
+use crate::recipe::{Fill, Op, Register};
 
 /// A named gradient: the palettes the prototype's `show gradients` offered.
 pub struct Gradient {
@@ -64,24 +64,72 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
         .first()
         .copied()
         .unwrap_or(Rgb::new(0xff, 0xff, 0xff));
+    let last = colors.last().copied().unwrap_or(first);
     match style {
         "plain" => Some(vec![Op::Fill {
             kind: Fill::Solid { color: first },
+            register: None,
         }]),
         "band" => Some(vec![Op::Fill {
-            kind: Fill::Band {
-                stops: colors.to_vec(),
-                steps: Some(10),
-            },
+            kind: banded(colors, Some(10)),
+            register: None,
         }]),
         "gradient" => Some(vec![Op::Fill {
-            kind: Fill::Band {
-                stops: colors.to_vec(),
-                steps: None,
-            },
+            kind: banded(colors, None),
+            register: None,
         }]),
         "trap" => Some(trap_pipeline(colors, 1)),
+        // The prototype's braille-behind-blocks shadow, native now: a cast
+        // offset down-right in braille, under a gradient body.
+        "shadow" => Some(vec![
+            Op::Cast {
+                spread: 1,
+                dx: 2,
+                dy: 2,
+                kind: Fill::Solid { color: last },
+                register: Some(Register::Braille),
+            },
+            Op::Fill {
+                kind: banded(colors, None),
+                register: None,
+            },
+        ]),
+        // A centered braille halo: same mechanism, no offset, wider spread.
+        "glow" => Some(vec![
+            Op::Cast {
+                spread: 3,
+                dx: 0,
+                dy: 0,
+                kind: Fill::Solid { color: last },
+                register: Some(Register::Braille),
+            },
+            Op::Fill {
+                kind: Fill::Solid { color: first },
+                register: None,
+            },
+        ]),
+        // Thick outer outline in the body's own register.
+        "sticker" => Some(vec![
+            Op::Cast {
+                spread: 3,
+                dx: 0,
+                dy: 0,
+                kind: Fill::Solid { color: first },
+                register: None,
+            },
+            Op::Fill {
+                kind: banded(colors, None),
+                register: None,
+            },
+        ]),
         _ => None,
+    }
+}
+
+fn banded(colors: &[Rgb], steps: Option<u32>) -> Fill {
+    Fill::Band {
+        stops: colors.to_vec(),
+        steps,
     }
 }
 
@@ -102,16 +150,20 @@ pub fn trap_pipeline(colors: &[Rgb], width: u32) -> Vec<Op> {
     vec![
         Op::Fill {
             kind: Fill::Solid { color: core },
+            register: None,
         },
         Op::Rim {
-            erode: width.max(1),
-            color: rim,
+            width: width.max(1),
+            kind: Fill::Solid { color: rim },
+            register: None,
         },
     ]
 }
 
 /// Style names the CLI accepts.
-pub const STYLES: &[&str] = &["plain", "band", "gradient", "trap"];
+pub const STYLES: &[&str] = &[
+    "plain", "band", "gradient", "trap", "shadow", "glow", "sticker",
+];
 
 #[cfg(test)]
 mod tests {

@@ -51,11 +51,13 @@ impl Paint {
     }
 }
 
-/// A painted region of the render: which pixels, and how they're colored.
+/// A painted region of the render: which pixels, how they're colored, and
+/// which symbol register draws them (`None` follows the recipe's body).
 #[derive(Debug, Clone)]
 pub struct Layer {
     pub mask: Mask,
     pub paint: Paint,
+    pub register: Option<crate::symbolizer::SymbolSet>,
 }
 
 #[derive(Debug)]
@@ -262,6 +264,39 @@ pub fn erode(mask: &Mask, radius: u32) -> Mask {
     out
 }
 
+/// Dilate a mask by `radius`: a pixel is set if any pixel within the radius
+/// is set. Optionally shifts the result by (`dx`, `dy`) pixels, which is how
+/// a cast becomes an offset drop shadow rather than a centered glow.
+pub fn dilate_offset(mask: &Mask, radius: u32, dx: i32, dy: i32) -> Mask {
+    let r = radius as i64;
+    let mut out = Mask::new(mask.width(), mask.height());
+    for y in 0..mask.height() {
+        for x in 0..mask.width() {
+            let sx = x as i64 - dx as i64;
+            let sy = y as i64 - dy as i64;
+            let mut on = false;
+            'window: for wy in -r..=r {
+                for wx in -r..=r {
+                    let (nx, ny) = (sx + wx, sy + wy);
+                    if nx >= 0
+                        && ny >= 0
+                        && nx < mask.width() as i64
+                        && ny < mask.height() as i64
+                        && mask.get(nx as usize, ny as usize)
+                    {
+                        on = true;
+                        break 'window;
+                    }
+                }
+            }
+            if on {
+                out.set(x, y, true);
+            }
+        }
+    }
+    out
+}
+
 /// Pixels in `a` that are not in `b`.
 pub fn difference(a: &Mask, b: &Mask) -> Mask {
     let mut out = Mask::new(a.width(), a.height());
@@ -279,54 +314,69 @@ pub fn difference(a: &Mask, b: &Mask) -> Mask {
 /// layers paint over earlier ones).
 pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
     let (bytes, index) = load_font(&recipe.font.family, recipe.font.style.as_deref())?;
-    // Blocks cover 2 pixel rows per cell; braille cover 4. Rasterize tall
-    // enough that the requested row count survives symbolization.
-    let px_per_row = match recipe.symbolizer.body {
-        crate::recipe::Register::Blocks => 2.0,
-        crate::recipe::Register::Braille => 4.0,
-    };
-    // Cap height ~= rows * px_per_row; em size overshoots ink height, so
-    // scale by a typical cap-height ratio.
-    let px = (recipe.rows as f32 * px_per_row) / 0.72;
+    // Every register shares a 2×4 pixel cell footprint (ADR-201), so the
+    // mask always rasterizes at 4 pixel rows per output row. Em size
+    // overshoots ink height, so scale by a typical cap-height ratio.
+    let px = (recipe.rows as f32 * 4.0) / 0.72;
     // One cell of air between glyphs: at banner sizes, natural side bearings
     // quantize away and letters collide.
     let base = rasterize_tracked(&bytes, index, &recipe.text, px, 0.5, px * 0.06)?;
 
     let mut layers = Vec::new();
     for op in &recipe.pipeline {
-        match op {
-            Op::Fill { kind } => {
-                let paint = match kind {
-                    Fill::Solid { color } => Paint::Solid(*color),
-                    Fill::Band { stops, steps } => Paint::Bands {
-                        stops: stops.clone(),
-                        steps: *steps,
-                    },
-                };
-                layers.push(Layer {
-                    mask: base.clone(),
-                    paint,
-                });
+        let (mask, kind, register) = match op {
+            Op::Fill { kind, register } => (base.clone(), kind, register),
+            Op::Rim {
+                width,
+                kind,
+                register,
+            } => {
+                // The body minus its eroded core. A fill painted before this
+                // stays visible inside, leaving the rim proud at the edges.
+                let core = erode(&base, *width);
+                (difference(&base, &core), kind, register)
             }
-            Op::Rim { erode: r, color } => {
-                // The rim is the whole glyph minus its eroded core. A fill
-                // painted after this covers the core again, leaving the rim
-                // proud at the edges.
-                let core = erode(&base, *r);
-                layers.push(Layer {
-                    mask: difference(&base, &core),
-                    paint: Paint::Solid(*color),
-                });
+            Op::Cast {
+                spread,
+                dx,
+                dy,
+                kind,
+                register,
+            } => {
+                // Outside the glyph only: the dilated, offset shape minus
+                // the body, so a cast never paints over its own letterform.
+                let spread_mask = dilate_offset(&base, *spread, *dx, *dy);
+                (difference(&spread_mask, &base), kind, register)
             }
-        }
+        };
+        let paint = match kind {
+            Fill::Solid { color } => Paint::Solid(*color),
+            Fill::Band { stops, steps } => Paint::Bands {
+                stops: stops.clone(),
+                steps: *steps,
+            },
+        };
+        layers.push(Layer {
+            mask,
+            paint,
+            register: register.as_ref().map(register_to_set),
+        });
     }
     if layers.is_empty() {
         layers.push(Layer {
             mask: base,
             paint: Paint::Solid(Rgb::new(0xff, 0xff, 0xff)),
+            register: None,
         });
     }
     Ok(layers)
+}
+
+fn register_to_set(r: &crate::recipe::Register) -> crate::symbolizer::SymbolSet {
+    match r {
+        crate::recipe::Register::Blocks => crate::symbolizer::SymbolSet::Blocks,
+        crate::recipe::Register::Braille => crate::symbolizer::SymbolSet::Braille,
+    }
 }
 
 #[cfg(test)]
