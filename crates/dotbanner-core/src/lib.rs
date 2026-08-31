@@ -21,6 +21,7 @@ pub fn render(recipe: &Recipe) -> Result<CellGrid, engine::EngineError> {
     let set = match recipe.symbolizer.body {
         Register::Blocks => SymbolSet::Blocks,
         Register::Braille => SymbolSet::Braille,
+        Register::Facets => SymbolSet::Facets,
     };
     Ok(symbolizer::symbolize_layers(&layers, set))
 }

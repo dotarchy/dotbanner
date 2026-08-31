@@ -96,13 +96,17 @@ pub enum SymbolSet {
     Blocks,
     /// Braille patterns (2×4 pixels per cell): U+2800..U+28FF.
     Braille,
+    /// Faceted blocks: the same quadrant coverage as [`SymbolSet::Blocks`],
+    /// but three-quadrant patterns render as large triangles `◤◥◣◢` instead
+    /// of the chunky `▛▜▙▟`, so edges read as cut faces.
+    Facets,
 }
 
 impl SymbolSet {
     /// Pixel window one output cell covers, as (width, height).
     pub fn cell_size(self) -> (usize, usize) {
         match self {
-            SymbolSet::Blocks => (2, 2),
+            SymbolSet::Blocks | SymbolSet::Facets => (2, 2),
             SymbolSet::Braille => (2, 4),
         }
     }
@@ -191,7 +195,22 @@ const QUADS: [char; 16] = [
     ' ', '▘', '▝', '▀', '▖', '▌', '▞', '▛', '▗', '▚', '▐', '▜', '▄', '▙', '▟', '█',
 ];
 
+/// Faceted variant of [`QUADS`]: identical except that the four
+/// three-quadrant patterns become large triangles, turning every corner
+/// into a cut face rather than a step.
+const FACETS: [char; 16] = [
+    ' ', '▘', '▝', '▀', '▖', '▌', '▞', '◤', '▗', '▚', '▐', '◥', '▄', '◣', '◢', '█',
+];
+
 fn quad_char(mask: &Mask, cx: usize, cy: usize) -> char {
+    QUADS[quad_bits(mask, cx, cy)]
+}
+
+fn facet_char(mask: &Mask, cx: usize, cy: usize) -> char {
+    FACETS[quad_bits(mask, cx, cy)]
+}
+
+fn quad_bits(mask: &Mask, cx: usize, cy: usize) -> usize {
     let x = cx * 2;
     let y = cy * 2;
     let mut bits = 0usize;
@@ -207,7 +226,7 @@ fn quad_char(mask: &Mask, cx: usize, cy: usize) -> char {
     if mask.get(x + 1, y + 1) {
         bits |= 8;
     }
-    QUADS[bits]
+    bits
 }
 
 /// Braille dot numbering (Unicode): dots 1–3 run down the left column, 4–6
@@ -255,6 +274,7 @@ pub fn symbolize(mask: &Mask, set: SymbolSet) -> CellGrid {
         for cx in 0..cols {
             cells.push(Cell::new(match set {
                 SymbolSet::Blocks => quad_char(mask, cx, cy),
+                SymbolSet::Facets => facet_char(mask, cx, cy),
                 SymbolSet::Braille => braille_char(mask, cx, cy),
             }));
         }
@@ -387,7 +407,7 @@ fn cell_glyph(
             }
             braille_char(&sub, 0, 0)
         }
-        SymbolSet::Blocks => {
+        SymbolSet::Blocks | SymbolSet::Facets => {
             let mut sub = Mask::new(2, 2);
             for qy in 0..2 {
                 for qx in 0..2 {
@@ -396,7 +416,11 @@ fn cell_glyph(
                     sub.set(qx, qy, on);
                 }
             }
-            quad_char(&sub, 0, 0)
+            if matches!(set, SymbolSet::Facets) {
+                facet_char(&sub, 0, 0)
+            } else {
+                quad_char(&sub, 0, 0)
+            }
         }
     }
 }
@@ -416,6 +440,24 @@ mod tests {
             let out = symbolize(&mask, SymbolSet::Blocks).lines();
             assert_eq!(out, vec![expected.to_string()], "pattern {bits:04b}");
         }
+    }
+
+    #[test]
+    fn facets_replace_three_quadrant_blocks_with_triangles() {
+        // Three quadrants set, missing the lower-right: blocks give the
+        // chunky corner, facets give a cut face.
+        let mut mask = Mask::new(2, 2);
+        mask.set(0, 0, true);
+        mask.set(1, 0, true);
+        mask.set(0, 1, true);
+        assert_eq!(symbolize(&mask, SymbolSet::Blocks).lines(), vec!["▛"]);
+        assert_eq!(symbolize(&mask, SymbolSet::Facets).lines(), vec!["◤"]);
+        // Everything else agrees with the block repertoire.
+        let full = Mask::from_sketch("##\n##");
+        assert_eq!(
+            symbolize(&full, SymbolSet::Blocks).lines(),
+            symbolize(&full, SymbolSet::Facets).lines()
+        );
     }
 
     #[test]

@@ -177,6 +177,9 @@ pub enum Register {
     #[default]
     Blocks,
     Braille,
+    /// Faceted blocks — three-quadrant patterns render as large triangles,
+    /// giving edges a cut-face read rather than a step.
+    Facets,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

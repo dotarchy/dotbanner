@@ -405,6 +405,7 @@ fn register_to_set(r: &crate::recipe::Register) -> crate::symbolizer::SymbolSet 
     match r {
         crate::recipe::Register::Blocks => crate::symbolizer::SymbolSet::Blocks,
         crate::recipe::Register::Braille => crate::symbolizer::SymbolSet::Braille,
+        crate::recipe::Register::Facets => crate::symbolizer::SymbolSet::Facets,
     }
 }
 
