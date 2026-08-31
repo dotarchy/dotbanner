@@ -67,16 +67,19 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
     let last = colors.last().copied().unwrap_or(first);
     match style {
         "plain" => Some(vec![Op::Fill {
+            inset: 0,
             kind: Fill::Solid { color: first },
             register: None,
             on_top: false,
         }]),
         "band" => Some(vec![Op::Fill {
+            inset: 0,
             kind: banded(colors, Some(10)),
             register: None,
             on_top: false,
         }]),
         "gradient" => Some(vec![Op::Fill {
+            inset: 0,
             kind: banded(colors, None),
             register: None,
             on_top: false,
@@ -94,6 +97,7 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
                 on_top: false,
             },
             Op::Fill {
+                inset: 0,
                 kind: banded(colors, None),
                 register: None,
                 on_top: false,
@@ -110,6 +114,7 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
                 on_top: false,
             },
             Op::Fill {
+                inset: 0,
                 kind: Fill::Solid { color: first },
                 register: None,
                 on_top: false,
@@ -126,6 +131,7 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
                 on_top: false,
             },
             Op::Fill {
+                inset: 0,
                 kind: banded(colors, None),
                 register: None,
                 on_top: false,
@@ -136,6 +142,7 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
         // read as texture rather than as a second shape.
         "stipple" => Some(vec![
             Op::Fill {
+                inset: 0,
                 kind: banded(colors, None),
                 register: None,
                 on_top: false,
@@ -155,6 +162,7 @@ pub fn style_pipeline(style: &str, colors: &[Rgb]) -> Option<Vec<Op>> {
         // the body.
         "halo" => Some(vec![
             Op::Fill {
+                inset: 0,
                 kind: Fill::Solid { color: last },
                 register: None,
                 on_top: false,
@@ -194,6 +202,7 @@ pub fn trap_pipeline(colors: &[Rgb], width: u32) -> Vec<Op> {
     let core = colors.last().copied().unwrap_or(Rgb::new(0xff, 0xd2, 0x1f));
     vec![
         Op::Fill {
+            inset: 0,
             kind: Fill::Solid { color: core },
             register: None,
             on_top: false,

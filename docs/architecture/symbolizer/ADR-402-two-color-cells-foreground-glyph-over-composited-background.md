@@ -35,10 +35,17 @@ three:
 - **The runner-up backs it.** The next-best layer paints the cell
   background, so two layers share the cell instead of one erasing the
   other. A layer that loses every cell it touches still contributes color.
-- **`on_top` inverts the contest.** A layer marked so takes the glyph
-  outright regardless of coverage and demotes the coverage winner to the
-  background. A braille layer marked `on_top` stipples its dots *over* a
-  solid body, the body's own color showing through as the ground.
+- **`on_top` inverts the contest, trapped to the interior.** A layer marked
+  so takes the glyph outright and demotes the coverage winner to the
+  background — but only in cells the layer beneath fills completely. At the
+  silhouette the body keeps its own glyph, so a sparse overlay never punches
+  holes in the outline or squares it off. A braille layer marked `on_top`
+  therefore stipples its dots over the body's interior while the body's
+  crisp block edges own the letterform.
+- **A background paints only from a fully covered cell.** Backgrounds fill
+  the whole cell rectangle, so drawing one from a partially covered edge
+  cell would spill past the silhouette. This is the same choke, applied to
+  color rather than glyph.
 - **A new `edge` region** spans both sides of the letterform boundary
   (`outer` pixels beyond, `inner` pixels within), so a paint can fade
   outward into the ground and inward into the body in one op.

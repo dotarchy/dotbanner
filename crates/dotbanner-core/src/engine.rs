@@ -332,10 +332,11 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
     for op in &recipe.pipeline {
         let (mask, kind, register, on_top) = match op {
             Op::Fill {
+                inset,
                 kind,
                 register,
                 on_top,
-            } => (base.clone(), kind, register, *on_top),
+            } => (erode(&base, *inset), kind, register, *on_top),
             Op::Rim {
                 width,
                 kind,

@@ -7,9 +7,7 @@
   "pipeline": [
     { "op": "fill", "kind": "solid", "color": "#e5e9f0" },
     {
-      "op": "edge",
-      "outer": 0,
-      "inner": 40,
+      "op": "fill",
       "kind": "band",
       "stops": ["#8fd4ff", "#2a6fd6", "#0a2a6e", "#ffffff", "#e8c98a", "#a8763a", "#5a3a12"],
       "steps": 14,

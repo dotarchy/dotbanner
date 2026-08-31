@@ -104,6 +104,38 @@ mod tests {
     }
 
     #[test]
+    fn an_overlay_is_trapped_to_fully_covered_cells() {
+        use crate::engine::{Layer, Paint};
+        use crate::symbolizer::symbolize_layers;
+        // Two cells side by side: the body fills the left one completely and
+        // the right one only halfway. The overlay may take the left; the
+        // right keeps the body's own glyph so the silhouette stays crisp.
+        let body = Mask::from_sketch("####\n####\n##\n##");
+        let overlay = Mask::from_sketch("####\n####\n####\n####");
+        let layers = vec![
+            Layer {
+                mask: body,
+                paint: Paint::Solid(Rgb::new(10, 10, 10)),
+                register: Some(SymbolSet::Blocks),
+                on_top: false,
+            },
+            Layer {
+                mask: overlay,
+                paint: Paint::Solid(Rgb::new(200, 200, 200)),
+                register: Some(SymbolSet::Braille),
+                on_top: true,
+            },
+        ];
+        let grid = symbolize_layers(&layers, SymbolSet::Blocks);
+        // Left cell: body covers all 8 pixels, so the overlay takes it.
+        assert_eq!(grid.get(0, 0).unwrap().ch, '⣿');
+        assert_eq!(grid.get(0, 0).unwrap().fg, Some(Rgb::new(200, 200, 200)));
+        // Right cell: body covers only the top half — the block glyph stays.
+        assert_eq!(grid.get(1, 0).unwrap().ch, '▀');
+        assert_eq!(grid.get(1, 0).unwrap().fg, Some(Rgb::new(10, 10, 10)));
+    }
+
+    #[test]
     fn a_braille_layer_draws_in_its_own_register() {
         use crate::engine::{Layer, Paint};
         use crate::symbolizer::symbolize_layers;

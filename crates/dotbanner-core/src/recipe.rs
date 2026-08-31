@@ -48,6 +48,7 @@ impl Recipe {
             font: Font::default(),
             rows: default_rows(),
             pipeline: vec![Op::Fill {
+                inset: 0,
                 kind: Fill::Solid {
                     color: Rgb::new(0xff, 0xff, 0xff),
                 },
@@ -88,8 +89,12 @@ impl Default for Font {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "op", rename_all = "lowercase")]
 pub enum Op {
-    /// Paint the glyph body.
+    /// Paint the glyph body, optionally pulled in from the edge by `inset`
+    /// mask pixels. An inset layer never touches the silhouette, so the
+    /// layer beneath keeps ownership of the letterform's outline.
     Fill {
+        #[serde(default, skip_serializing_if = "is_zero")]
+        inset: u32,
         #[serde(flatten)]
         kind: Fill,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -148,6 +153,10 @@ fn default_width() -> u32 {
     1
 }
 
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum Fill {
@@ -201,6 +210,7 @@ mod tests {
             rows: 8,
             pipeline: vec![
                 Op::Fill {
+                    inset: 0,
                     kind: Fill::Band {
                         stops: vec![
                             Rgb::parse("#f8ffff").unwrap(),
@@ -262,6 +272,7 @@ mod tests {
         assert_eq!(
             r.pipeline,
             vec![Op::Fill {
+                inset: 0,
                 kind: Fill::Solid {
                     color: Rgb::new(255, 0, 0)
                 },

@@ -319,9 +319,19 @@ pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet)
                     under = Some((layer, count, sum_y));
                 }
             }
+            // An overlay is trapped to the interior: it takes the cell only
+            // where the layer beneath fills every pixel. At the silhouette
+            // the body keeps its own crisp glyph, so a sparse overlay never
+            // punches holes in the outline or squares it off.
             if let Some(top) = overlay {
-                under = owner.or(under);
-                owner = Some(top);
+                if let Some((_, base_count, _)) = owner {
+                    if base_count == CELL_W * CELL_H {
+                        under = owner;
+                        owner = Some(top);
+                    }
+                } else {
+                    owner = Some(top);
+                }
             }
 
             let Some((layer, count, sum_y)) = owner else {
@@ -340,8 +350,14 @@ pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet)
             let set = layer.register.unwrap_or(default_set);
             let glyph = cell_glyph(&layer.mask, col, row, set, CELL_W, CELL_H);
             let mut cell = Cell::with_fg(glyph, paint_at(layer, count, sum_y));
+            // A background paints the whole cell rectangle, so it may only
+            // come from a layer that genuinely fills the cell. Painting one
+            // from a partially covered edge cell would spill past the
+            // silhouette and square the letterform off.
             if let Some((below, bc, bsum)) = under {
-                cell = cell.with_bg(paint_at(below, bc, bsum));
+                if bc == CELL_W * CELL_H {
+                    cell = cell.with_bg(paint_at(below, bc, bsum));
+                }
             }
             cells.push(cell);
         }
