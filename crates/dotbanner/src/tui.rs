@@ -18,11 +18,24 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use ratatui::{DefaultTerminal, Frame};
 
 use dotbanner_core::{
+    color::Rgb,
+    engine::Paint,
     presets,
-    recipe::{Font, Recipe, Register, Stage},
+    recipe::{Recipe, Register, Stage},
     scheme,
     symbolizer::CellGrid,
 };
+
+/// A register's geometry, shown beside its name in the picker.
+fn register_hint(r: &Register) -> &'static str {
+    match r {
+        Register::Blocks => "2×2 quadrants",
+        Register::Facets => "2×2, corners as triangles",
+        Register::Sextants => "2×3 semigraphics",
+        Register::Braille => "2×4 dots",
+        Register::Unknown(_) => "",
+    }
+}
 
 /// The registers a control can cycle through — the four this build draws
 /// with. A recipe loaded with an unknown register keeps it until the user
@@ -77,7 +90,15 @@ impl Control {
 
     /// Whether Enter opens free-text editing on this control.
     fn takes_text(self) -> bool {
-        matches!(self, Control::Text | Control::Palette | Control::Path)
+        matches!(self, Control::Text | Control::Path)
+    }
+
+    /// Whether Enter opens a picker popover on this control.
+    fn has_picker(self) -> bool {
+        matches!(
+            self,
+            Control::Font | Control::Style | Control::Palette | Control::Register
+        )
     }
 }
 
@@ -89,12 +110,38 @@ enum Mode {
     Edit,
 }
 
-/// Which sidebar the panel shows: the recipe's controls, or the font
-/// browser — a filterable family list whose selection previews live.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum View {
-    Recipe,
-    Fonts,
+/// A popover for choosing a selector control's value from its items —
+/// the one convention every such setting shares: type to filter, ↑↓
+/// previews the highlighted item live in the document, Enter keeps it,
+/// Esc restores the state the picker opened on.
+struct Picker {
+    control: Control,
+    filter: String,
+    /// Selected row in the filtered list.
+    sel: usize,
+    /// Computed once at open — a palette row's ramp would otherwise
+    /// re-parse every scheme file per frame.
+    items: Vec<PickerItem>,
+    /// Document and derived control state at open; Esc restores all of it.
+    undo: (Recipe, Option<String>, String),
+}
+
+/// One row a picker offers: the value's name plus what shows it — a
+/// palette's ramp, a register's geometry.
+struct PickerItem {
+    name: String,
+    ramp: Vec<Rgb>,
+    hint: &'static str,
+}
+
+impl PickerItem {
+    fn plain(name: String) -> Self {
+        Self {
+            name,
+            ramp: Vec::new(),
+            hint: "",
+        }
+    }
 }
 
 pub struct App {
@@ -118,13 +165,8 @@ pub struct App {
     fonts: Vec<String>,
     focus: usize,
     mode: Mode,
-    view: View,
-    /// Substring the font browser filters families by.
-    font_filter: String,
-    /// Selected row in the browser's filtered list.
-    font_sel: usize,
-    /// The document's font when the browser opened; Esc restores it.
-    font_entry: Font,
+    /// The open picker popover, when a selector control has one up.
+    picker: Option<Picker>,
     status: String,
     /// Set when the document changed since the preview was last rendered.
     dirty: bool,
@@ -197,10 +239,7 @@ impl App {
             fonts: dotbanner_core::engine::list_families(),
             focus: 0,
             mode: Mode::Navigate,
-            view: View::Recipe,
-            font_filter: String::new(),
-            font_sel: 0,
-            font_entry: Font::default(),
+            picker: None,
             status: String::new(),
             // Due already: the opening frame renders without a cooldown.
             dirty: true,
@@ -332,67 +371,179 @@ impl App {
         }
     }
 
-    /// Families matching the browser's filter, in list order.
-    fn filtered_fonts(&self) -> Vec<String> {
-        let filter = self.font_filter.to_ascii_lowercase();
-        self.fonts
-            .iter()
-            .filter(|f| filter.is_empty() || f.to_ascii_lowercase().contains(&filter))
-            .cloned()
+    /// Every item a control's picker can offer, in list order.
+    fn picker_items(&self, control: Control) -> Vec<PickerItem> {
+        match control {
+            Control::Font => self.fonts.iter().cloned().map(PickerItem::plain).collect(),
+            Control::Style => presets::STYLES
+                .iter()
+                .map(|s| PickerItem::plain(s.to_string()))
+                .collect(),
+            Control::Palette => scheme::all()
+                .into_iter()
+                .map(|s| PickerItem {
+                    ramp: s.ramp(),
+                    name: s.name,
+                    hint: "",
+                })
+                .collect(),
+            Control::Register => REGISTERS
+                .iter()
+                .map(|r| PickerItem {
+                    name: r.as_str().to_string(),
+                    ramp: Vec::new(),
+                    hint: register_hint(r),
+                })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The open picker's item names after its filter.
+    fn picker_list(&self) -> Vec<String> {
+        let Some(p) = &self.picker else {
+            return Vec::new();
+        };
+        filter_items(&p.items, &p.filter)
+            .into_iter()
+            .map(|i| i.name.clone())
             .collect()
     }
 
-    /// Open the font browser on the document's current family.
-    fn open_fonts(&mut self) {
-        self.view = View::Fonts;
-        self.font_entry = self.recipe.font.clone();
-        self.font_filter.clear();
-        self.font_sel = self
-            .fonts
-            .iter()
-            .position(|f| *f == self.recipe.font.family)
-            .unwrap_or(0);
+    /// The value the picker's control currently holds, as an item string.
+    fn picker_current(&self, control: Control) -> String {
+        match control {
+            Control::Font => self.recipe.font.family.clone(),
+            Control::Style => self.style.clone().unwrap_or_else(|| "custom".into()),
+            Control::Palette => self.colors.clone(),
+            Control::Register => self.recipe.symbolizer.body.as_str().to_string(),
+            _ => String::new(),
+        }
     }
 
-    /// Write the browser's selection into the document, so the preview
-    /// shows the highlighted family as it moves.
-    fn font_apply(&mut self) {
-        let list = self.filtered_fonts();
+    /// Open a picker on a control, selecting its current value. A current
+    /// value no item carries (a custom style, a hex list, an unknown
+    /// register, an uninstalled family) leaves the selection at the top,
+    /// unapplied.
+    fn open_picker(&mut self, control: Control) {
+        let current = self.picker_current(control);
+        let items = self.picker_items(control);
+        let sel = items
+            .iter()
+            .position(|i| i.name.eq_ignore_ascii_case(&current))
+            .unwrap_or(0);
+        self.picker = Some(Picker {
+            control,
+            filter: String::new(),
+            sel,
+            items,
+            undo: (self.recipe.clone(), self.style.clone(), self.colors.clone()),
+        });
+    }
+
+    /// Write the picker's selection into the document, so the preview
+    /// shows the highlighted item as it moves.
+    fn picker_apply(&mut self) {
+        let Some(p) = &self.picker else { return };
+        let control = p.control;
+        let sel = p.sel;
+        let list = self.picker_list();
         if list.is_empty() {
             return;
         }
-        self.font_sel = self.font_sel.min(list.len() - 1);
-        let family = list[self.font_sel].clone();
-        if self.recipe.font.family != family {
-            self.recipe.font.family = family;
-            // A face name is per family (see the font control).
-            self.recipe.font.style = None;
-            self.mark_changed();
+        let sel = sel.min(list.len() - 1);
+        if let Some(p) = &mut self.picker {
+            p.sel = sel;
+        }
+        let item = list[sel].clone();
+        if self.picker_current(control).eq_ignore_ascii_case(&item) {
+            return;
+        }
+        match control {
+            Control::Font => {
+                self.recipe.font.family = item;
+                // A face name is per family (see the font control).
+                self.recipe.font.style = None;
+                self.mark_changed();
+            }
+            Control::Style => {
+                self.style = Some(item);
+                self.rebuild_pipeline();
+            }
+            // With a custom pipeline nothing paints with a palette, so
+            // refuse before touching the spec — the same guard the panel
+            // control has. Writing `colors` anyway would let Enter keep a
+            // palette a later style pick silently adopts.
+            Control::Palette if self.style.is_none() => {
+                self.status = "the pipeline is custom — pick a style to use colors".into();
+            }
+            Control::Palette => {
+                self.colors = item;
+                self.rebuild_pipeline();
+            }
+            Control::Register => {
+                if let Some(r) = REGISTERS.iter().find(|r| r.as_str() == item) {
+                    self.recipe.symbolizer.body = r.clone();
+                    self.mark_changed();
+                }
+            }
+            _ => {}
         }
     }
 
-    /// Move the browser selection by `delta`, stopping at the list's ends —
-    /// a browser walks, it does not wrap.
-    fn font_browse(&mut self, delta: i64) {
-        let len = self.filtered_fonts().len();
+    /// Move the picker selection by `delta`, stopping at the list's ends —
+    /// a picker walks, it does not wrap. Only a selection that actually
+    /// moved applies: Up at the top of the list is not a choice.
+    fn picker_browse(&mut self, delta: i64) {
+        let len = self.picker_list().len();
+        let Some(p) = &mut self.picker else { return };
         if len == 0 {
             return;
         }
-        self.font_sel = (self.font_sel as i64 + delta).clamp(0, len as i64 - 1) as usize;
-        self.font_apply();
+        let sel = p.sel.min(len - 1);
+        let next = (sel as i64 + delta).clamp(0, len as i64 - 1) as usize;
+        p.sel = next;
+        if next != sel {
+            self.picker_apply();
+        }
     }
 
     /// Reselect after a filter change. A keystroke that edits the filter
-    /// expresses no choice of family, so the document's font moves only
-    /// when the filter no longer matches it.
-    fn font_reselect(&mut self) {
-        let list = self.filtered_fonts();
-        match list.iter().position(|f| *f == self.recipe.font.family) {
-            Some(at) => self.font_sel = at,
+    /// expresses no choice, so the document moves only when the filter
+    /// excludes a value an item carries. A value no item ever carried — a
+    /// custom style, a hex list, an unknown register — stays put until ↑↓
+    /// or Enter chooses (ADR-202: the register comment above REGISTERS is
+    /// a promise).
+    fn picker_reselect(&mut self) {
+        let Some(p) = &self.picker else { return };
+        let current = self.picker_current(p.control);
+        let known = p
+            .items
+            .iter()
+            .any(|i| i.name.eq_ignore_ascii_case(&current));
+        let list = self.picker_list();
+        let at = list.iter().position(|i| i.eq_ignore_ascii_case(&current));
+        let Some(p) = &mut self.picker else { return };
+        match at {
+            Some(at) => p.sel = at,
             None => {
-                self.font_sel = 0;
-                self.font_apply();
+                p.sel = 0;
+                if known {
+                    self.picker_apply();
+                }
             }
+        }
+    }
+
+    /// Close the picker, restoring the state it opened on.
+    fn picker_revert(&mut self) {
+        let Some(p) = self.picker.take() else { return };
+        let (recipe, style, colors) = p.undo;
+        if self.recipe != recipe || self.style != style || self.colors != colors {
+            self.recipe = recipe;
+            self.style = style;
+            self.colors = colors;
+            self.mark_changed();
         }
     }
 
@@ -466,32 +617,37 @@ impl App {
             self.quit = true;
             return;
         }
-        if self.view == View::Fonts {
+        if self.picker.is_some() {
             match code {
-                // Enter keeps the selection the preview already shows; Esc
-                // puts back the font the browser opened on.
-                KeyCode::Enter => self.view = View::Recipe,
-                KeyCode::Esc => {
-                    if self.recipe.font != self.font_entry {
-                        self.recipe.font = self.font_entry.clone();
-                        self.mark_changed();
-                    }
-                    self.view = View::Recipe;
+                // Enter chooses the highlighted item — the one keystroke
+                // that IS a choice, so a selection browsing never applied
+                // (a custom style's top row, say) applies here — then
+                // closes. Esc puts back everything the picker opened on.
+                KeyCode::Enter => {
+                    self.picker_apply();
+                    self.picker = None;
                 }
-                KeyCode::Up => self.font_browse(-1),
-                KeyCode::Down => self.font_browse(1),
-                KeyCode::PageUp => self.font_browse(-10),
-                KeyCode::PageDown => self.font_browse(10),
+                KeyCode::Esc => self.picker_revert(),
+                KeyCode::Up => self.picker_browse(-1),
+                KeyCode::Down => self.picker_browse(1),
+                KeyCode::PageUp => self.picker_browse(-10),
+                KeyCode::PageDown => self.picker_browse(10),
                 KeyCode::Backspace => {
-                    if self.font_filter.pop().is_some() {
-                        self.font_reselect();
+                    let popped = self
+                        .picker
+                        .as_mut()
+                        .is_some_and(|p| p.filter.pop().is_some());
+                    if popped {
+                        self.picker_reselect();
                     }
                 }
                 KeyCode::Char(c)
                     if !modifiers.intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
                 {
-                    self.font_filter.push(c);
-                    self.font_reselect();
+                    if let Some(p) = &mut self.picker {
+                        p.filter.push(c);
+                    }
+                    self.picker_reselect();
                 }
                 _ => {}
             }
@@ -547,9 +703,13 @@ impl App {
             }
             KeyCode::Left | KeyCode::Char('h') => self.adjust(-1),
             KeyCode::Right | KeyCode::Char('l') => self.adjust(1),
-            KeyCode::Char('f') => self.open_fonts(),
-            KeyCode::Enter if self.focused() == Control::Font => self.open_fonts(),
+            KeyCode::Char('f') => self.open_picker(Control::Font),
+            KeyCode::Char('c') => self.open_picker(Control::Palette),
+            KeyCode::Enter if self.focused().has_picker() => self.open_picker(self.focused()),
             KeyCode::Enter if self.focused().takes_text() => self.mode = Mode::Edit,
+            // Raw hex lists still want free-text entry, which Enter now
+            // spends on the picker.
+            KeyCode::Char('e') if self.focused() == Control::Palette => self.mode = Mode::Edit,
             _ => {}
         }
     }
@@ -668,44 +828,106 @@ fn control_line(app: &App, control: Control) -> Line<'static> {
     ])
 }
 
-/// The font browser panel: the filter line, then a window of the filtered
-/// families scrolled to keep the selection visible.
-fn fonts_panel(app: &App, height: usize) -> Vec<Line<'static>> {
-    let list = app.filtered_fonts();
+/// A palette ramp as a truecolor bar.
+fn swatch_spans(ramp: &[Rgb]) -> Vec<Span<'static>> {
+    const WIDTH: usize = 16;
+    if ramp.is_empty() {
+        return Vec::new();
+    }
+    let paint = Paint::Bands {
+        stops: ramp.to_vec(),
+        steps: None,
+    };
+    (0..WIDTH)
+        .map(|i| {
+            let c = paint.color_at(i as f32 / (WIDTH - 1) as f32);
+            Span::styled("█", Style::default().fg(Color::Rgb(c.r, c.g, c.b)))
+        })
+        .collect()
+}
+
+/// The items matching a picker's filter, in list order. The list and the
+/// popup both read this, so the highlighted row and the applied item
+/// cannot diverge.
+fn filter_items<'a>(items: &'a [PickerItem], filter: &str) -> Vec<&'a PickerItem> {
+    let filter = filter.to_ascii_lowercase();
+    items
+        .iter()
+        .filter(|i| filter.is_empty() || i.name.to_ascii_lowercase().contains(&filter))
+        .collect()
+}
+
+/// The picker popover, centered over the editor: the filter line, then a
+/// window of the filtered items scrolled to keep the selection visible.
+/// Palette rows carry their ramp as a swatch, register rows their
+/// geometry.
+fn picker_popup(app: &App, frame: &mut Frame, body: Rect) {
+    let Some(p) = &app.picker else { return };
+    // A popup that cannot show its border, filter line, and one row has
+    // nothing to draw — and clamp(4, height) would panic below 4.
+    if body.height < 4 || body.width < 8 {
+        return;
+    }
+    let items = filter_items(&p.items, &p.filter);
+
+    let width = 46.min(body.width);
+    let height = (items.len() as u16 + 3).clamp(4, body.height);
+    let area = Rect {
+        x: body.x + (body.width - width) / 2,
+        y: body.y + (body.height - height) / 2,
+        width,
+        height,
+    };
+
     let mut lines = vec![Line::from(vec![
         Span::styled("  filter   ", Style::default().fg(Color::DarkGray)),
         Span::styled(
-            format!(" {} ", app.font_filter),
+            format!(" {} ", p.filter),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(Modifier::BOLD),
         ),
     ])];
-    if list.is_empty() {
-        lines.push(Line::from(format!(
-            "  no family matches '{}'",
-            app.font_filter
-        )));
-        return lines;
+    if items.is_empty() {
+        lines.push(Line::from(format!("  nothing matches '{}'", p.filter)));
+    } else {
+        let rows = (height as usize).saturating_sub(3).max(1);
+        let sel = p.sel.min(items.len() - 1);
+        let offset = window_offset(sel, items.len(), rows);
+        for (i, item) in items.iter().enumerate().skip(offset).take(rows) {
+            let (marker, style) = if i == sel {
+                (
+                    "▸ ",
+                    Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
+                )
+            } else {
+                ("  ", Style::default())
+            };
+            let mut spans = vec![
+                Span::raw(marker),
+                Span::styled(format!(" {:<18} ", item.name), style),
+            ];
+            spans.extend(swatch_spans(&item.ramp));
+            if !item.hint.is_empty() {
+                spans.push(Span::styled(
+                    item.hint,
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
     }
-    let rows = height.saturating_sub(1).max(1);
-    let sel = app.font_sel.min(list.len() - 1);
-    let offset = window_offset(sel, list.len(), rows);
-    for (i, family) in list.iter().enumerate().skip(offset).take(rows) {
-        let (marker, style) = if i == sel {
-            (
-                "▸ ",
-                Style::default().add_modifier(Modifier::BOLD | Modifier::REVERSED),
-            )
-        } else {
-            ("  ", Style::default())
-        };
-        lines.push(Line::from(vec![
-            Span::raw(marker),
-            Span::styled(format!(" {family} "), style),
-        ]));
-    }
-    lines
+
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(format!(
+            " {} {}/{} ",
+            p.control.label(),
+            items.len(),
+            p.items.len()
+        ))),
+        area,
+    );
 }
 
 fn draw(app: &mut App, frame: &mut Frame) {
@@ -714,18 +936,9 @@ fn draw(app: &mut App, frame: &mut Frame) {
     let [panel, preview] =
         Layout::horizontal([Constraint::Length(34), Constraint::Min(10)]).areas(body);
 
-    let (panel_title, lines) = match app.view {
-        View::Recipe => (
-            " recipe ".to_string(),
-            CONTROLS.iter().map(|c| control_line(app, *c)).collect(),
-        ),
-        View::Fonts => (
-            format!(" fonts {}/{} ", app.filtered_fonts().len(), app.fonts.len()),
-            fonts_panel(app, panel.height.saturating_sub(2) as usize),
-        ),
-    };
+    let lines: Vec<Line> = CONTROLS.iter().map(|c| control_line(app, *c)).collect();
     frame.render_widget(
-        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(panel_title)),
+        Paragraph::new(lines).block(Block::default().borders(Borders::ALL).title(" recipe ")),
         panel,
     );
 
@@ -767,10 +980,25 @@ fn draw(app: &mut App, frame: &mut Frame) {
         }
     }
 
-    let help = match (app.view, app.mode) {
-        (View::Fonts, _) => "type to filter · ↑↓ pick · enter keep · esc revert",
-        (_, Mode::Navigate) => "↑↓ control · ←→ change · enter edit · f fonts · s save · q quit",
-        (_, Mode::Edit) => "type to edit · enter/esc done",
+    picker_popup(app, frame, body);
+
+    let help = if app.picker.is_some() {
+        "type to filter · ↑↓ pick · enter choose · esc revert".to_string()
+    } else {
+        match app.mode {
+            Mode::Navigate => {
+                // Hex lists lost Enter to the picker; say where they went.
+                let hex = if app.focused() == Control::Palette {
+                    " · e hex"
+                } else {
+                    ""
+                };
+                format!(
+                    "↑↓ control · ←→ change · enter pick/edit · f fonts · c colors{hex} · s save · q quit"
+                )
+            }
+            Mode::Edit => "type to edit · enter/esc done".to_string(),
+        }
     };
     // The transient message, then the standing conditions: a half-typed
     // palette name (the pipeline still paints with the last valid one), and
@@ -1043,8 +1271,17 @@ mod tests {
         assert_eq!(band_count(10, 4), 3);
     }
 
+    /// Force the open picker's selection to `sel` and apply it, the way a
+    /// browse movement would.
+    fn pick(app: &mut App, sel: usize) {
+        if let Some(p) = &mut app.picker {
+            p.sel = sel;
+        }
+        app.picker_apply();
+    }
+
     #[test]
-    fn the_font_browser_previews_keeps_and_reverts() {
+    fn the_font_picker_previews_keeps_and_reverts() {
         let mut app = app_with(Recipe::new("hi"));
         if app.fonts.len() < 2 {
             return; // Not enough fonts installed to browse.
@@ -1054,23 +1291,21 @@ mod tests {
         // Browsing writes the highlighted family into the document; Esc
         // puts the original back.
         app.on_key(KeyCode::Char('f'), KeyModifiers::NONE);
-        assert_eq!(app.view, View::Fonts);
-        app.font_sel = 0;
-        app.font_apply();
-        app.font_browse(1);
-        assert_eq!(app.recipe.font.family, app.filtered_fonts()[1]);
+        assert!(app.picker.is_some());
+        pick(&mut app, 0);
+        app.picker_browse(1);
+        assert_eq!(app.recipe.font.family, app.picker_list()[1]);
         app.on_key(KeyCode::Esc, KeyModifiers::NONE);
-        assert_eq!(app.view, View::Recipe);
+        assert!(app.picker.is_none());
         assert_eq!(app.recipe.font, original, "esc reverts the preview");
 
         // Enter keeps what the preview shows.
         app.on_key(KeyCode::Char('f'), KeyModifiers::NONE);
-        app.font_sel = 0;
-        app.font_apply();
-        app.font_browse(1);
+        pick(&mut app, 0);
+        app.picker_browse(1);
         let picked = app.recipe.font.family.clone();
         app.on_key(KeyCode::Enter, KeyModifiers::NONE);
-        assert_eq!(app.view, View::Recipe);
+        assert!(app.picker.is_none());
         assert_eq!(app.recipe.font.family, picked);
     }
 
@@ -1095,6 +1330,118 @@ mod tests {
             app.on_key(KeyCode::Char(c), KeyModifiers::NONE);
         }
         assert_eq!(app.recipe.font.family, family);
+    }
+
+    #[test]
+    fn the_palette_picker_carries_swatches_and_reverts_the_pipeline() {
+        let mut app = app_with(Recipe::new("hi"));
+        app.rebuild_pipeline();
+        let pipeline = app.recipe.pipeline.clone();
+
+        app.on_key(KeyCode::Char('c'), KeyModifiers::NONE);
+        let p = app.picker.as_ref().unwrap();
+        assert_eq!(p.control, Control::Palette);
+        assert!(
+            p.items.iter().all(|i| i.ramp.len() >= 3),
+            "every palette row carries its ramp for the swatch"
+        );
+        assert_eq!(
+            p.items[p.sel].name, "omarchy",
+            "opens on the current palette"
+        );
+
+        // Browsing repaints the pipeline; Esc restores palette and
+        // pipeline both.
+        app.picker_browse(1);
+        assert_ne!(app.recipe.pipeline, pipeline);
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.colors, "omarchy");
+        assert_eq!(app.recipe.pipeline, pipeline, "esc restores the pipeline");
+    }
+
+    #[test]
+    fn a_tiny_terminal_cannot_panic_the_popup() {
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+        let mut app = app_with(Recipe::new("hi"));
+        app.open_picker(Control::Register);
+        for (w, h) in [(10u16, 3u16), (5, 4), (80, 2), (2, 2), (46, 5)] {
+            let mut t = Terminal::new(TestBackend::new(w, h)).unwrap();
+            t.draw(|f| draw(&mut app, f)).unwrap();
+        }
+    }
+
+    #[test]
+    fn a_filter_keystroke_never_applies_over_a_value_no_item_carries() {
+        // A custom pipeline's style is a value no picker item carries, so
+        // typing in the style picker must not hand the pipeline over.
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"rim","width":5,"kind":"solid","color":"#123456"}]}"##;
+        let mut app = app_with_loaded(Recipe::from_json(json).unwrap());
+        let before = app.recipe.pipeline.clone();
+        focus_on(&mut app, Control::Style);
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
+        assert_eq!(app.recipe.pipeline, before, "a filter edit is not a choice");
+        assert_eq!(app.style, None);
+
+        // Up at the top of the list is not a choice either.
+        app.on_key(KeyCode::Backspace, KeyModifiers::NONE);
+        app.on_key(KeyCode::Up, KeyModifiers::NONE);
+        assert_eq!(app.recipe.pipeline, before);
+
+        // Enter is: it chooses the highlighted item.
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.style.as_deref(), Some("plain"));
+        assert_ne!(app.recipe.pipeline, before);
+    }
+
+    #[test]
+    fn an_unknown_register_survives_picker_filtering() {
+        // The comment above REGISTERS is a promise (ADR-202): an unknown
+        // register keeps its name until the user moves the control.
+        let json = r##"{"text":"x","symbolizer":{"body":"hexants"}}"##;
+        let mut app = app_with_loaded(Recipe::from_json(json).unwrap());
+        focus_on(&mut app, Control::Register);
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        app.on_key(KeyCode::Char('b'), KeyModifiers::NONE);
+        assert_eq!(app.recipe.symbolizer.body.as_str(), "hexants");
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.recipe.symbolizer.body.as_str(), "hexants");
+    }
+
+    #[test]
+    fn the_palette_picker_refuses_a_custom_pipeline() {
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"rim","width":5,"kind":"solid","color":"#123456"}]}"##;
+        let mut app = app_with_loaded(Recipe::from_json(json).unwrap());
+        app.on_key(KeyCode::Char('c'), KeyModifiers::NONE);
+        app.picker_browse(1);
+        assert_eq!(
+            app.colors, "omarchy",
+            "nothing paints with a palette here, so the spec must not move"
+        );
+        assert!(app.status.contains("custom"));
+    }
+
+    #[test]
+    fn the_style_picker_hands_a_custom_pipeline_over_deliberately() {
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"rim","width":5,"kind":"solid","color":"#123456"}]}"##;
+        let mut app = app_with_loaded(Recipe::from_json(json).unwrap());
+        let before = app.recipe.pipeline.clone();
+
+        // Opening the style picker applies nothing by itself.
+        focus_on(&mut app, Control::Style);
+        app.on_key(KeyCode::Enter, KeyModifiers::NONE);
+        assert_eq!(app.recipe.pipeline, before);
+
+        // Esc keeps the custom pipeline and the custom marker.
+        app.picker_browse(1);
+        assert_ne!(app.recipe.pipeline, before, "a browse move applies");
+        app.on_key(KeyCode::Esc, KeyModifiers::NONE);
+        assert_eq!(app.recipe.pipeline, before);
+        assert_eq!(app.style, None, "still custom after revert");
     }
 
     #[test]
@@ -1152,7 +1499,7 @@ mod tests {
         for _ in 0..4 {
             app.on_key(KeyCode::Char('@'), KeyModifiers::NONE);
         }
-        assert!(app.filtered_fonts().is_empty());
+        assert!(app.picker_list().is_empty());
         assert_eq!(app.recipe.font, before, "no match, no change");
     }
 }
