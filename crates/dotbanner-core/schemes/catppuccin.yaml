@@ -1,0 +1,8 @@
+# Signature colours of the catppuccin theme.
+name: catppuccin
+ramp:
+  - "#cdd6f4"
+  - "#89b4fa"
+  - "#cba6f7"
+  - "#f5c2e7"
+  - "#1e1e2e"

@@ -1,0 +1,8 @@
+# Signature colours of the rose-pine theme.
+name: rose-pine
+ramp:
+  - "#e0def4"
+  - "#ebbcba"
+  - "#eb6f92"
+  - "#c4a7e7"
+  - "#191724"

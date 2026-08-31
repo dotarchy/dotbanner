@@ -1,0 +1,26 @@
+name: Artifact
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build release
+        run: cargo build --release
+      - name: Smoke test the binary
+        run: ./target/release/dotbanner render "dotbanner" --rows 6 --style band
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dotbanner-linux-x86_64
+          path: target/release/dotbanner
+          if-no-files-found: error

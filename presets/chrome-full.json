@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "name": "chrome-full",
+  "text": "dotarchy",
+  "font": {
+    "family": "DejaVu Sans",
+    "style": "Bold"
+  },
+  "rows": 10,
+  "pipeline": [
+    {
+      "op": "fill",
+      "kind": "band",
+      "stops": [
+        "#5fbdf5",
+        "#1f5ec0",
+        "#0a2a6e",
+        "#e8eef8",
+        "#c8a86a",
+        "#8a5c28",
+        "#4a2e0c"
+      ],
+      "steps": 14
+    },
+    {
+      "op": "fill",
+      "kind": "band",
+      "stops": [
+        "#d8f2ff",
+        "#7fb6f2",
+        "#3f6fd0",
+        "#ffffff",
+        "#fff0cc",
+        "#e0b070",
+        "#a07038"
+      ],
+      "register": "braille",
+      "on_top": true
+    }
+  ]
+}

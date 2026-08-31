@@ -1,0 +1,8 @@
+# Signature colours of the solarized theme.
+name: solarized
+ramp:
+  - "#fdf6e3"
+  - "#b58900"
+  - "#cb4b16"
+  - "#268bd2"
+  - "#002b36"

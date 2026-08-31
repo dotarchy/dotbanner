@@ -7,4 +7,5 @@ repository.workspace = true
 description = "Terminal banner and figlet-family font generator"
 
 [dependencies]
+clap = { version = "4.6.6", features = ["derive"] }
 dotbanner-core = { path = "../dotbanner-core" }

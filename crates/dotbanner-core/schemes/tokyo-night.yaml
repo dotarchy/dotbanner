@@ -1,0 +1,8 @@
+# Signature colours of the tokyo-night theme.
+name: tokyo-night
+ramp:
+  - "#c0caf5"
+  - "#7dcfff"
+  - "#7aa2f7"
+  - "#bb9af7"
+  - "#1a1b26"

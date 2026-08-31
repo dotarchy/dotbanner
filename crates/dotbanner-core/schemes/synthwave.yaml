@@ -1,0 +1,7 @@
+# Hot pink into deep indigo.
+name: synthwave
+ramp:
+  - "#f8f8ff"
+  - "#ff6ec7"
+  - "#8a2be2"
+  - "#1a0a3e"

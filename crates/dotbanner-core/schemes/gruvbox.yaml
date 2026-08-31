@@ -1,0 +1,8 @@
+# Signature colours of the gruvbox theme.
+name: gruvbox
+ramp:
+  - "#fbf1c7"
+  - "#fabd2f"
+  - "#fe8019"
+  - "#cc241d"
+  - "#282828"

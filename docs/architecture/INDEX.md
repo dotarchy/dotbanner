@@ -27,14 +27,16 @@ _The recipe JSON contract — schema, presets, compatibility_
 
 | ADR | Title | Status |
 |-----|-------|--------|
-| [ADR-200](./recipe/ADR-200-recipe-json-as-the-canonical-pipeline-document.md) | Recipe JSON as the canonical pipeline document | Proposed |
+| [ADR-200](./recipe/ADR-200-recipe-json-as-the-canonical-pipeline-document.md) | Recipe JSON as the canonical pipeline document | Accepted |
+| [ADR-201](./recipe/ADR-201-pipeline-op-vocabulary-fill-rim-cast-with-paints-and-registers.md) | Pipeline op vocabulary — fill, rim, cast with paints and registers | Accepted |
+| [ADR-202](./recipe/ADR-202-unknown-ops-degrade-the-layer-never-the-recipe.md) | Unknown ops degrade the layer, never the recipe | Accepted |
 
 ## Engine
 _Rasterization, image-space effects, the pipeline model_
 
 | ADR | Title | Status |
 |-----|-------|--------|
-| [ADR-300](./engine/ADR-300-pure-rust-image-space-pipeline-with-fill-rim-cast-primitives.md) | Pure-Rust image-space pipeline with fill/rim/cast primitives | Proposed |
+| [ADR-300](./engine/ADR-300-pure-rust-image-space-pipeline-with-fill-rim-cast-primitives.md) | Pure-Rust image-space pipeline with fill/rim/cast primitives | Accepted |
 
 ## Symbolizer
 _Pixels-to-cells mapping — symbol sets, coverage, determinism_
@@ -42,3 +44,4 @@ _Pixels-to-cells mapping — symbol sets, coverage, determinism_
 | ADR | Title | Status |
 |-----|-------|--------|
 | [ADR-400](./symbolizer/ADR-400-own-the-pixels-to-cells-symbolizer-instead-of-wrapping-chafa.md) | Own the pixels-to-cells symbolizer instead of wrapping chafa | Accepted |
+| [ADR-402](./symbolizer/ADR-402-two-color-cells-foreground-glyph-over-composited-background.md) | Two-color cells — foreground glyph over composited background | Accepted |

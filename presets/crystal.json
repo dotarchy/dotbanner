@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "name": "crystal",
+  "text": "dotarchy",
+  "font": { "family": "DejaVu Sans", "style": "Bold" },
+  "rows": 12,
+  "symbolizer": { "body": "facets" },
+  "pipeline": [
+    { "op": "fill", "kind": "band",
+      "stops": ["#dff4ff", "#8fcdec", "#3f7fb8"], "steps": 7 },
+    { "op": "fill", "inset": 2, "kind": "band",
+      "stops": ["#0d1f33", "#1b3a5c", "#0a1826"], "steps": 5,
+      "register": "facets", "on_top": true },
+    { "op": "fill", "inset": 5, "kind": "band",
+      "stops": ["#bfe8ff", "#68b0dc", "#2a5f8f"], "steps": 5,
+      "register": "facets", "on_top": true },
+    { "op": "fill", "inset": 8, "kind": "band",
+      "stops": ["#14273d", "#2c5a8e", "#0b1a2a"], "steps": 4,
+      "register": "facets", "on_top": true }
+  ]
+}

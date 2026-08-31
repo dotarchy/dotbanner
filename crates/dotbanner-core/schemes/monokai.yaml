@@ -1,0 +1,8 @@
+# Signature colours of the monokai theme.
+name: monokai
+ramp:
+  - "#f92672"
+  - "#fd971f"
+  - "#e6db74"
+  - "#a6e22e"
+  - "#66d9ef"

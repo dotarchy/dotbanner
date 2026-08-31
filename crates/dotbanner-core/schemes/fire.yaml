@@ -1,0 +1,7 @@
+# Ember through flame to ash.
+name: fire
+ramp:
+  - "#fff8d8"
+  - "#ffd21f"
+  - "#ff5f1f"
+  - "#8a0f0f"
