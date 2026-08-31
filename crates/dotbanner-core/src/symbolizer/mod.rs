@@ -20,10 +20,12 @@ impl Mask {
     ///
     /// Panics if `width * height` overflows `usize`.
     pub fn new(width: usize, height: usize) -> Self {
-        let len = width
-            .checked_mul(height)
-            .expect("mask dimensions overflow");
-        Self { width, height, bits: vec![false; len] }
+        let len = width.checked_mul(height).expect("mask dimensions overflow");
+        Self {
+            width,
+            height,
+            bits: vec![false; len],
+        }
     }
 
     /// Build from per-pixel luminance (row-major) against a threshold.
@@ -33,12 +35,14 @@ impl Mask {
     ///
     /// Panics if `luma.len() != width * height`, or on dimension overflow.
     pub fn from_luma(width: usize, height: usize, luma: &[u8], threshold: u8) -> Self {
-        let len = width
-            .checked_mul(height)
-            .expect("mask dimensions overflow");
+        let len = width.checked_mul(height).expect("mask dimensions overflow");
         assert_eq!(luma.len(), len, "luma buffer size mismatch");
         let bits = luma.iter().map(|&v| v >= threshold).collect();
-        Self { width, height, bits }
+        Self {
+            width,
+            height,
+            bits,
+        }
     }
 
     /// Build from a text sketch: `'#'` is set, any other character is clear.
@@ -104,18 +108,22 @@ impl SymbolSet {
     }
 }
 
-/// One terminal cell of symbolized output. Carries the glyph today; color
-/// and register attribution attach here as the engine grows (ADR-300/400),
-/// which is why sinks receive cells rather than strings.
+/// One terminal cell of symbolized output: the glyph, and the foreground it
+/// paints with (`None` for uncolored/mono sinks).
 #[non_exhaustive]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
+    pub fg: Option<crate::color::Rgb>,
 }
 
 impl Cell {
     pub fn new(ch: char) -> Self {
-        Self { ch }
+        Self { ch, fg: None }
+    }
+
+    pub fn with_fg(ch: char, fg: crate::color::Rgb) -> Self {
+        Self { ch, fg: Some(fg) }
     }
 }
 
@@ -235,20 +243,83 @@ pub fn symbolize(mask: &Mask, set: SymbolSet) -> CellGrid {
     CellGrid { cols, rows, cells }
 }
 
+/// Symbolize painted layers into one colored grid.
+///
+/// Layers paint in order; for each cell the last layer with any set pixel
+/// wins the foreground, and the glyph comes from the union of all layers, so
+/// a rim and its body compose into a single cell without a second pass.
+pub fn symbolize_layers(layers: &[crate::engine::Layer], set: SymbolSet) -> CellGrid {
+    let width = layers.iter().map(|l| l.mask.width()).max().unwrap_or(0);
+    let height = layers.iter().map(|l| l.mask.height()).max().unwrap_or(0);
+    let mut union = Mask::new(width, height);
+    for layer in layers {
+        for y in 0..layer.mask.height() {
+            for x in 0..layer.mask.width() {
+                if layer.mask.get(x, y) {
+                    union.set(x, y, true);
+                }
+            }
+        }
+    }
+
+    let (cw, ch) = set.cell_size();
+    let grid = symbolize(&union, set);
+    let mut cells = Vec::with_capacity(grid.cols() * grid.rows());
+    for row in 0..grid.rows() {
+        for col in 0..grid.cols() {
+            let glyph = grid.get(col, row).map(|c| c.ch).unwrap_or(' ');
+            let mut fg = None;
+            for layer in layers {
+                let mut hit = false;
+                let mut sum_y = 0usize;
+                let mut count = 0usize;
+                for dy in 0..ch {
+                    for dx in 0..cw {
+                        let (x, y) = (col * cw + dx, row * ch + dy);
+                        if layer.mask.get(x, y) {
+                            hit = true;
+                            sum_y += y;
+                            count += 1;
+                        }
+                    }
+                }
+                if hit {
+                    let mid = sum_y as f32 / count as f32;
+                    let t = if height > 1 {
+                        mid / (height - 1) as f32
+                    } else {
+                        0.0
+                    };
+                    fg = Some(layer.paint.color_at(t));
+                }
+            }
+            cells.push(match fg {
+                Some(c) => Cell::with_fg(glyph, c),
+                None => Cell::new(glyph),
+            });
+        }
+    }
+    CellGrid {
+        cols: grid.cols(),
+        rows: grid.rows(),
+        cells,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn every_quad_pattern_maps_to_its_symbol() {
-        for bits in 0..16usize {
+        for (bits, expected) in QUADS.iter().enumerate() {
             let mut mask = Mask::new(2, 2);
             mask.set(0, 0, bits & 1 != 0);
             mask.set(1, 0, bits & 2 != 0);
             mask.set(0, 1, bits & 4 != 0);
             mask.set(1, 1, bits & 8 != 0);
             let out = symbolize(&mask, SymbolSet::Blocks).lines();
-            assert_eq!(out, vec![QUADS[bits].to_string()], "pattern {bits:04b}");
+            assert_eq!(out, vec![expected.to_string()], "pattern {bits:04b}");
         }
     }
 
