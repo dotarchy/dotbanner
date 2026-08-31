@@ -1,0 +1,7 @@
+# Cool neutral, brushed metal.
+name: steel
+ramp:
+  - "#f8fbff"
+  - "#c8d4e0"
+  - "#5a7088"
+  - "#1a2530"

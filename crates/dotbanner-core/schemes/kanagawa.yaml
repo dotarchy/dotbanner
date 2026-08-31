@@ -1,0 +1,8 @@
+# Signature colours of the kanagawa theme.
+name: kanagawa
+ramp:
+  - "#dcd7ba"
+  - "#7e9cd8"
+  - "#957fb8"
+  - "#ffa066"
+  - "#1f1f28"

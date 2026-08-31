@@ -249,40 +249,42 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
             out.push_str(&format!(
                 "{}\n  {}  {}\n  {}  {}\n  {}  {}\n\n",
                 heading("--colors accepts"),
-                name("a hex list "),
+                name("a hex list"),
                 hint("--colors \"#f8ffff,#3f7fe8,#8a2fc8\"   any length, top to bottom"),
-                name("a preset   "),
-                hint("--colors fire                     named below"),
-                name("a scheme   "),
-                hint("--colors monokai                  any base16 file you install"),
+                name("a palette "),
+                hint("--colors fire                        named below"),
+                name("a file    "),
+                hint("--colors gruvbox-dark-hard           any base16 or ramp file"),
             ));
-            out.push_str(&format!("{}\n", heading("presets")));
-            for g in presets::GRADIENTS {
-                let stops: Vec<Rgb> = presets::gradient(g.name).unwrap_or_default();
-                out.push_str(&format!("  {}{}\n", name(&pad(g.name, 18)), swatch(&stops)));
-            }
-            out.push_str(&format!("\n{}\n", heading("schemes")));
-            for g in presets::SCHEMES {
-                let stops: Vec<Rgb> = presets::gradient(g.name).unwrap_or_default();
-                out.push_str(&format!("  {}{}\n", name(&pad(g.name, 18)), swatch(&stops)));
-            }
-            let installed = scheme::installed();
+            let all = scheme::all();
+            let (installed, shipped): (Vec<_>, Vec<_>) = all
+                .iter()
+                .partition(|s| s.source == scheme::Source::Installed);
             if !installed.is_empty() {
-                out.push_str(&format!("\n{}\n", heading("installed (base16)")));
-                for s in &installed {
+                out.push_str(&format!("{}\n", heading("installed")));
+                for sc in &installed {
                     out.push_str(&format!(
                         "  {}{}\n",
-                        name(&pad(&s.name, 18)),
-                        swatch(&s.ramp())
+                        name(&pad(&sc.name, 18)),
+                        swatch(&sc.ramp())
                     ));
                 }
+                out.push('\n');
+            }
+            out.push_str(&format!("{}\n", heading("built in")));
+            for sc in &shipped {
+                out.push_str(&format!(
+                    "  {}{}\n",
+                    name(&pad(&sc.name, 18)),
+                    swatch(&sc.ramp())
+                ));
             }
             out.push_str(&format!(
                 "\n{}\n{}\n{}\n",
                 hint("Render one:  dotbanner render \"text\" --colors monokai"),
                 hint("See them rendered:  dotbanner show colors \"text\""),
                 hint(&format!(
-                    "Install more: drop base16 .yaml or .json into {}",
+                    "Add or override: drop a base16 or ramp file into {}",
                     scheme::scheme_dirs()
                         .first()
                         .map(|p| p.display().to_string())
@@ -291,7 +293,7 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
             ));
         }
         "gradients" => {
-            for g in presets::all_presets() {
+            for g in scheme::all() {
                 out.push_str(&format!("\n{}\n", hint(&format!("──── {}", g.name))));
                 let args = RenderArgs {
                     text: Some(sample.to_string()),
@@ -299,7 +301,7 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
                     style_name: None,
                     rows: 6,
                     style: "band".into(),
-                    colors: g.name.into(),
+                    colors: g.name.clone(),
                     dots: false,
                     trap_width: 1,
                     fit: Some("terminal".into()),
@@ -497,13 +499,10 @@ fn show_topics() -> String {
         name("styles   "),
         hint(&presets::STYLES.join(", ")),
         name("colors   "),
-        hint(
-            &presets::GRADIENTS
-                .iter()
-                .map(|g| g.name)
-                .collect::<Vec<_>>()
-                .join(", ")
-        ),
+        hint(&format!(
+            "{} palettes, any hex list, any base16 file",
+            scheme::all().len()
+        )),
         name("fonts    "),
         name("registers"),
         hint("Each takes optional text: dotbanner show styles \"my text\""),

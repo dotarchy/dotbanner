@@ -1,0 +1,7 @@
+# Pale green through teal.
+name: mint
+ramp:
+  - "#f0fff8"
+  - "#7fffd4"
+  - "#20b2aa"
+  - "#0a4f4f"

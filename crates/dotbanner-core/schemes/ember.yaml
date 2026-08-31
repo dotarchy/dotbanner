@@ -1,0 +1,7 @@
+# Dark to bright: lit from below.
+name: ember
+ramp:
+  - "#2b0a02"
+  - "#8a0f0f"
+  - "#ff5f1f"
+  - "#ffd21f"

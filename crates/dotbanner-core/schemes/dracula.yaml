@@ -1,0 +1,8 @@
+# Signature colours of the dracula theme.
+name: dracula
+ramp:
+  - "#f8f8f2"
+  - "#8be9fd"
+  - "#bd93f9"
+  - "#ff79c6"
+  - "#282a36"

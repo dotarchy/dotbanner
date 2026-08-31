@@ -16,11 +16,27 @@ use std::path::{Path, PathBuf};
 
 use crate::color::Rgb;
 
-/// A base16 palette: sixteen slots in their canonical order.
+/// A named palette. It carries either the sixteen base16 slots or an
+/// explicit ramp — both describe a set of colours a banner can paint with,
+/// and both come from the same kind of file, so the built-in palettes and
+/// anything dropped into a scheme directory are the same thing.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Scheme {
     pub name: String,
-    pub slots: [Rgb; 16],
+    pub source: Source,
+    /// Present when the file gave a full base16 palette.
+    pub slots: Option<[Rgb; 16]>,
+    /// Present when the file gave an explicit `ramp:` list.
+    pub explicit: Option<Vec<Rgb>>,
+}
+
+/// Where a scheme came from, so a listing can say which are overridable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Source {
+    /// Shipped in the binary; a file of the same name shadows it.
+    BuiltIn,
+    /// Found in a scheme directory.
+    Installed,
 }
 
 impl Scheme {
@@ -33,16 +49,26 @@ impl Scheme {
     /// three accents in between are the slots themes vary most, so schemes
     /// stay recognisable.
     pub fn ramp(&self) -> Vec<Rgb> {
-        [0x05, 0x0D, 0x0E, 0x08, 0x01]
-            .iter()
-            .map(|i| self.slots[*i as usize])
-            .collect()
+        if let Some(ramp) = &self.explicit {
+            return ramp.clone();
+        }
+        match &self.slots {
+            Some(slots) => [0x05, 0x0D, 0x0E, 0x08, 0x01]
+                .iter()
+                .map(|i| slots[*i as usize])
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     /// Parse a base16 scheme from YAML or JSON. Both are read the same way —
     /// find every `baseNN` key and take the hex colour after it — which
     /// covers the base16 YAML schemes, their JSON ports and hand-written
     /// files without pulling in a parser for either language.
+    /// `name` is the palette's identity — the thing typed after `--colors`.
+    /// It comes from the filename rather than any `name:` inside the file,
+    /// because a base16 file's own name is a display title ("Gruvbox dark,
+    /// hard") and rarely typeable.
     pub fn parse(name: &str, text: &str) -> Option<Self> {
         let mut slots: [Option<Rgb>; 16] = [None; 16];
         // Scan the whole text rather than line by line: YAML puts one key
@@ -70,17 +96,53 @@ impl Scheme {
                 slots[slot as usize] = Some(rgb);
             }
         }
-        if slots.iter().any(|s| s.is_none()) {
-            return None;
+        if slots.iter().all(|s| s.is_some()) {
+            let mut out = [Rgb::new(0, 0, 0); 16];
+            for (i, slot) in slots.iter().enumerate() {
+                out[i] = slot.expect("all slots checked above");
+            }
+            return Some(Scheme {
+                name: name.to_string(),
+                source: Source::Installed,
+                slots: Some(out),
+                explicit: None,
+            });
         }
-        let mut out = [Rgb::new(0, 0, 0); 16];
-        for (i, slot) in slots.iter().enumerate() {
-            out[i] = slot.expect("all slots checked above");
-        }
-        Some(Scheme {
+
+        // No palette: look for an explicit ramp, a list of hex colours under
+        // a `ramp:` key. Curated gradients are ramps rather than palettes,
+        // and this lets them live in the same kind of file.
+        let ramp = Self::declared_ramp(text)?;
+        (!ramp.is_empty()).then(|| Scheme {
             name: name.to_string(),
-            slots: out,
+            source: Source::Installed,
+            slots: None,
+            explicit: Some(ramp),
         })
+    }
+
+    /// The hex colours following a `ramp:` key, in order.
+    fn declared_ramp(text: &str) -> Option<Vec<Rgb>> {
+        let start = text.find("ramp:")? + "ramp:".len();
+        let mut out = Vec::new();
+        for line in text[start..].lines() {
+            let trimmed = line.trim();
+            // A blank line or a new top-level key ends the list.
+            if trimmed.is_empty() {
+                continue;
+            }
+            let token: String = trimmed
+                .chars()
+                .skip_while(|c| *c != '#')
+                .take_while(|c| *c == '#' || c.is_ascii_hexdigit())
+                .collect();
+            match Rgb::parse(&token) {
+                Ok(rgb) => out.push(rgb),
+                Err(_) if out.is_empty() => continue,
+                Err(_) => break,
+            }
+        }
+        Some(out)
     }
 
     /// Read a scheme file, taking its name from the file stem.
@@ -89,6 +151,40 @@ impl Scheme {
         let name = path.file_stem()?.to_string_lossy().to_string();
         Scheme::parse(&name, &text)
     }
+}
+
+/// The palettes shipped in the binary, as the same kind of file a user
+/// would install. A scheme directory entry of the same name shadows one.
+const BUILT_IN: &[(&str, &str)] = &[
+    ("omarchy", include_str!("../schemes/omarchy.yaml")),
+    ("fire", include_str!("../schemes/fire.yaml")),
+    ("synthwave", include_str!("../schemes/synthwave.yaml")),
+    ("mint", include_str!("../schemes/mint.yaml")),
+    ("ember", include_str!("../schemes/ember.yaml")),
+    ("steel", include_str!("../schemes/steel.yaml")),
+    ("monokai", include_str!("../schemes/monokai.yaml")),
+    ("gruvbox", include_str!("../schemes/gruvbox.yaml")),
+    ("nord", include_str!("../schemes/nord.yaml")),
+    ("dracula", include_str!("../schemes/dracula.yaml")),
+    ("catppuccin", include_str!("../schemes/catppuccin.yaml")),
+    ("tokyo-night", include_str!("../schemes/tokyo-night.yaml")),
+    ("solarized", include_str!("../schemes/solarized.yaml")),
+    ("everforest", include_str!("../schemes/everforest.yaml")),
+    ("rose-pine", include_str!("../schemes/rose-pine.yaml")),
+    ("kanagawa", include_str!("../schemes/kanagawa.yaml")),
+];
+
+/// The shipped palettes, in the order they are declared.
+pub fn built_in() -> Vec<Scheme> {
+    BUILT_IN
+        .iter()
+        .filter_map(|(name, text)| {
+            Scheme::parse(name, text).map(|mut s| {
+                s.source = Source::BuiltIn;
+                s
+            })
+        })
+        .collect()
 }
 
 /// Where scheme files are looked for, in order: the user's config, then
@@ -135,9 +231,21 @@ pub fn installed() -> Vec<Scheme> {
     found
 }
 
-/// Look one scheme up by name.
+/// Every palette a name can resolve to: installed files first, so a file
+/// shadows a built-in of the same name, then the shipped set.
+pub fn all() -> Vec<Scheme> {
+    let mut out = installed();
+    for scheme in built_in() {
+        if !out.iter().any(|s| s.name == scheme.name) {
+            out.push(scheme);
+        }
+    }
+    out
+}
+
+/// Look one palette up by name.
 pub fn find(name: &str) -> Option<Scheme> {
-    installed().into_iter().find(|s| s.name == name)
+    all().into_iter().find(|s| s.name == name)
 }
 
 #[cfg(test)]
@@ -168,8 +276,41 @@ base0F: "d65d0e"
     #[test]
     fn parses_base16_yaml() {
         let s = Scheme::parse("gruvbox-hard", BASE16_YAML).expect("parses");
-        assert_eq!(s.slots[0x00], Rgb::parse("#1d2021").unwrap());
-        assert_eq!(s.slots[0x0F], Rgb::parse("#d65d0e").unwrap());
+        let slots = s.slots.expect("a palette");
+        assert_eq!(slots[0x00], Rgb::parse("#1d2021").unwrap());
+        assert_eq!(slots[0x0F], Rgb::parse("#d65d0e").unwrap());
+    }
+
+    #[test]
+    fn parses_an_explicit_ramp() {
+        let text = "name: fire\nramp:\n  - \"#fff8d8\"\n  - \"#ffd21f\"\n  - \"#8a0f0f\"\n";
+        let s = Scheme::parse("fire", text).expect("parses");
+        assert_eq!(s.name, "fire", "identity comes from the filename");
+        assert!(s.slots.is_none());
+        assert_eq!(s.ramp().len(), 3);
+    }
+
+    #[test]
+    fn every_built_in_parses_and_has_a_ramp() {
+        let all = built_in();
+        assert_eq!(
+            all.len(),
+            BUILT_IN.len(),
+            "a shipped scheme failed to parse"
+        );
+        for s in &all {
+            assert!(s.ramp().len() >= 3, "{} has too short a ramp", s.name);
+            assert_eq!(s.source, Source::BuiltIn);
+        }
+    }
+
+    #[test]
+    fn built_in_names_are_unique() {
+        let mut names: Vec<String> = built_in().into_iter().map(|s| s.name).collect();
+        let total = names.len();
+        names.sort();
+        names.dedup();
+        assert_eq!(names.len(), total);
     }
 
     #[test]
@@ -181,11 +322,12 @@ base0F: "d65d0e"
             "base0C": "#8ec07c", "base0D": "#83a598", "base0E": "#d3869b",
             "base0F": "#d65d0e" }"##;
         let s = Scheme::parse("x", json).expect("parses");
-        assert_eq!(s.slots[0x0A], Rgb::parse("#fabd2f").unwrap());
+        assert_eq!(s.slots.unwrap()[0x0A], Rgb::parse("#fabd2f").unwrap());
     }
 
     #[test]
     fn an_incomplete_palette_is_rejected() {
+        // Neither a full palette nor a ramp.
         assert!(Scheme::parse("x", "base00: \"111111\"\nbase01: \"222222\"").is_none());
     }
 
@@ -193,8 +335,9 @@ base0F: "d65d0e"
     fn the_ramp_runs_foreground_to_background() {
         let s = Scheme::parse("x", BASE16_YAML).unwrap();
         let ramp = s.ramp();
+        let slots = s.slots.expect("a palette");
         assert_eq!(ramp.len(), 5);
-        assert_eq!(ramp[0], s.slots[0x05]);
-        assert_eq!(ramp[4], s.slots[0x01]);
+        assert_eq!(ramp[0], slots[0x05]);
+        assert_eq!(ramp[4], slots[0x01]);
     }
 }

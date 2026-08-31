@@ -1,0 +1,7 @@
+# Sky to violet, stepped — the omarchy wordmark treatment.
+name: omarchy
+ramp:
+  - "#f8ffff"
+  - "#a8ecfa"
+  - "#3f7fe8"
+  - "#8a2fc8"

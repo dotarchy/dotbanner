@@ -1,0 +1,8 @@
+# Signature colours of the everforest theme.
+name: everforest
+ramp:
+  - "#d3c6aa"
+  - "#a7c080"
+  - "#83c092"
+  - "#7fbbb3"
+  - "#2d353b"
