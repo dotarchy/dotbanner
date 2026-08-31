@@ -5,31 +5,41 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+mod style;
+use style::{bad, cmd, heading, hint, name, quoted};
+
 use dotbanner_core::{
     engine,
     formats::ansi,
     presets,
-    recipe::{Font, Recipe, Register, SymbolizerSpec},
+    recipe::{Fit, Font, Recipe, Register, SymbolizerSpec},
 };
 
-const LADDER: &str = "\
-Three rungs, each one step further in:
-
-  1  flags        dotbanner render \"hello\" --style band --colors fire
-  2  see it       dotbanner recipe \"hello\" --style band --colors fire
-                  prints the recipe those flags built — the whole render as JSON
-  3  edit it      dotbanner render --recipe my.json \"other text\"
-                  every effect, colour and register, composable without flags
-
-Discover what the flags accept:
-  dotbanner show styles · gradients · fonts [filter] · registers";
+/// The three-rung model, rendered with the chrome roles. Built at run time
+/// because colour depends on whether stdout is a terminal.
+fn ladder() -> String {
+    format!(
+        "{}\n\n  1  {}  {}\n  2  {}  {}\n{}\n  3  {}  {}\n{}\n\n{}\n  {}",
+        heading("Three rungs, each one step further in:"),
+        name("flags   "),
+        cmd("dotbanner render \"hello\" --style band --colors fire"),
+        name("see it  "),
+        cmd("dotbanner recipe \"hello\" --style band --colors fire"),
+        hint("                    prints the recipe those flags built, as JSON"),
+        name("edit it "),
+        cmd("dotbanner render --recipe my.json \"other text\""),
+        hint("                    every effect, colour and register, without flags"),
+        heading("Discover what the flags accept:"),
+        cmd("dotbanner show styles · colors · fonts [filter] · registers"),
+    )
+}
 
 #[derive(Parser)]
 #[command(
     name = "dotbanner",
     version,
     about = "Terminal banners and figlet-family fonts from real TTF outlines",
-    after_help = LADDER,
+    after_help = ladder(),
     long_about = None
 )]
 struct Cli {
@@ -65,6 +75,12 @@ struct RenderArgs {
     /// Output height in terminal rows
     #[arg(short, long, default_value_t = 8)]
     rows: usize,
+    /// Shrink until the banner fits: a column count, or "terminal"
+    #[arg(long, value_name = "COLS|terminal")]
+    fit: Option<String>,
+    /// Space between glyphs as a fraction of the em (0 for none)
+    #[arg(long, value_name = "EM")]
+    tracking: Option<f32>,
     /// Effect style: plain, band, gradient, trap
     #[arg(short = 's', long, default_value = "plain")]
     style: String,
@@ -133,7 +149,19 @@ fn build_recipe(args: &RenderArgs) -> Result<Recipe, String> {
         recipe.font.style = args.style_name.clone();
     }
     if args.rows != 8 {
-        recipe.rows = args.rows;
+        recipe.size.rows = args.rows;
+    }
+    if let Some(fit) = &args.fit {
+        recipe.size.fit =
+            Some(match fit.as_str() {
+                "terminal" | "term" | "auto" => Fit::Terminal,
+                n => Fit::Columns(n.parse().map_err(|_| {
+                    format!("--fit wants a column count or \"terminal\", not '{fit}'")
+                })?),
+            });
+    }
+    if let Some(t) = args.tracking {
+        recipe.size.tracking = t;
     }
     if args.dots {
         recipe.symbolizer = SymbolizerSpec {
@@ -141,16 +169,6 @@ fn build_recipe(args: &RenderArgs) -> Result<Recipe, String> {
         };
     }
     Ok(recipe)
-}
-
-/// Wrap a family in quotes when it contains spaces, so a suggestion can be
-/// pasted straight back onto the command line.
-fn quoted(name: &str) -> String {
-    if name.contains(' ') {
-        format!("\"{name}\"")
-    } else {
-        name.to_string()
-    }
 }
 
 fn font_error(e: engine::EngineError) -> String {
@@ -172,7 +190,7 @@ fn font_error(e: engine::EngineError) -> String {
         engine::EngineError::FontAmbiguous { query, matches } => {
             let list = matches
                 .iter()
-                .map(|n| format!("\n    {}", quoted(n)))
+                .map(|n| format!("\n    {}", name(&quoted(n))))
                 .collect::<String>();
             format!("'{query}' matches several families — pick one:{list}")
         }
@@ -193,10 +211,19 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
     const SAMPLE: &str = "dotbanner";
     let sample = text.unwrap_or(SAMPLE);
     let mut out = String::new();
-    match what {
+    // Accept the singular and the flag's own spelling: --colors takes a
+    // gradient, so `show colors` has to reach the same place.
+    let topic = match what {
+        "style" => "styles",
+        "colors" | "colours" | "colour" | "color" | "gradient" => "gradients",
+        "font" => "fonts",
+        "register" => "registers",
+        other => other,
+    };
+    match topic {
         "styles" => {
             for style in presets::STYLES {
-                out.push_str(&format!("\n\x1b[2m──── {style}\x1b[0m\n"));
+                out.push_str(&format!("\n{}\n", hint(&format!("──── {style}"))));
                 let args = RenderArgs {
                     text: Some(sample.to_string()),
                     font: "DejaVu Sans".into(),
@@ -206,6 +233,8 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
                     colors: "omarchy".into(),
                     dots: false,
                     trap_width: 1,
+                    fit: Some("terminal".into()),
+                    tracking: None,
                     recipe: None,
                 };
                 out.push_str(&render(&args)?);
@@ -213,7 +242,7 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
         }
         "gradients" => {
             for g in presets::GRADIENTS {
-                out.push_str(&format!("\n\x1b[2m──── {}\x1b[0m\n", g.name));
+                out.push_str(&format!("\n{}\n", hint(&format!("──── {}", g.name))));
                 let args = RenderArgs {
                     text: Some(sample.to_string()),
                     font: "DejaVu Sans".into(),
@@ -223,6 +252,8 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
                     colors: g.name.into(),
                     dots: false,
                     trap_width: 1,
+                    fit: Some("terminal".into()),
+                    tracking: None,
                     recipe: None,
                 };
                 out.push_str(&render(&args)?);
@@ -239,9 +270,10 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
                 .collect();
             if shown.is_empty() {
                 return Err(format!(
-                    "no installed family matches '{}'\n  \
-                     list them all:  dotbanner show fonts",
-                    filter
+                    "no installed family matches '{}'\n  {} {}",
+                    filter,
+                    hint("list them all:"),
+                    cmd("dotbanner show fonts"),
                 ));
             }
             for family in &shown {
@@ -250,26 +282,37 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
                 out.push('\n');
             }
             out.push_str(&format!(
-                "\n\x1b[2m{} of {} families · filter with: dotbanner show fonts <text>\x1b[0m\n",
-                shown.len(),
-                all.len()
+                "\n{}\n",
+                hint(&format!(
+                    "{} of {} families · filter with: dotbanner show fonts <text>",
+                    shown.len(),
+                    all.len()
+                ))
             ));
         }
         "registers" => {
-            out.push_str(
-                "\x1b[1mregisters\x1b[0m  which glyphs a layer draws with\n\n\
-                 \x1b[1mblocks\x1b[0m    2x2 quadrants — the default, universal font support\n\
-                 \x1b[1mfacets\x1b[0m    2x2, corners as triangles — crystalline edges\n\
-                 \x1b[1msextants\x1b[0m  2x3 semigraphics — finer, needs Legacy Computing coverage\n\
-                 \x1b[1mbraille\x1b[0m   2x4 dots — finest, reads as texture\n\n\
-                 \x1b[2mSet the body register in a recipe's \"symbolizer\", or per layer\n\
-                 with a layer's \"register\". See: dotbanner recipe <text> --style stipple\x1b[0m\n",
-            );
+            out.push_str(&format!(
+                "{}  which glyphs a layer draws with\n\n  {}  {}\n  {}  {}\n  {}  {}\n  {}  {}\n\n{}\n",
+                heading("registers"),
+                name("blocks  "),
+                hint("2x2 quadrants — the default, universal font support"),
+                name("facets  "),
+                hint("2x2, corners as triangles — crystalline edges"),
+                name("sextants"),
+                hint("2x3 semigraphics — needs Legacy Computing font coverage"),
+                name("braille "),
+                hint("2x4 dots — finest, reads as texture"),
+                hint(
+                    "Set the body register in a recipe's \"symbolizer\", or per layer with a\n\
+                     layer's \"register\". See it: dotbanner recipe <text> --style stipple"
+                ),
+            ));
         }
         other => {
             return Err(format!(
-                "don't know how to show '{other}'\n  \
-                 try:  styles · gradients · fonts · registers"
+                "don't know how to show '{other}'\n  {} {}",
+                hint("try:"),
+                name("styles · colors · fonts · registers"),
             ))
         }
     }
@@ -280,30 +323,61 @@ fn show(what: &str, text: Option<&str>) -> Result<String, String> {
 /// works, before any flag reference.
 fn overview() -> String {
     format!(
-        "\x1b[1mdotbanner\x1b[0m — terminal banners from the real fonts on your system\n\n\
-         Start here:\n  \
-         dotbanner render \"hello\"\n  \
-         dotbanner render \"hello\" --style band --colors fire\n  \
-         dotbanner show styles\n\n{LADDER}\n\n\
-         \x1b[2mFull flag reference: dotbanner render --help\x1b[0m\n"
+        "{} — terminal banners from the real fonts on your system\n\n{}\n  {}\n  {}\n  {}\n\n{}\n\n{}\n",
+        heading("dotbanner"),
+        heading("Start here:"),
+        cmd("dotbanner render \"hello\""),
+        cmd("dotbanner render \"hello\" --style band --colors fire"),
+        cmd("dotbanner show styles"),
+        ladder(),
+        hint("Full flag reference: dotbanner render --help"),
     )
 }
 
 /// clap's own errors are terse ("a value is required for '--font <FONT>'"),
 /// so add the one thing the reader needs next: where to find valid values.
-fn hint_for(err: &clap::Error) -> Option<&'static str> {
-    let text = err.to_string();
-    if text.contains("--font") || text.contains("-f") {
-        Some("\n  font names, quoted and ready to paste:  dotbanner show fonts [filter]")
-    } else if text.contains("--style") {
-        Some("\n  every style, rendered:  dotbanner show styles")
-    } else if text.contains("--colors") {
-        Some("\n  every gradient, rendered:  dotbanner show gradients")
-    } else if text.contains("--recipe") {
-        Some("\n  build one from flags first:  dotbanner recipe \"text\" --style band")
-    } else {
-        None
+fn hint_for(err: &clap::Error) -> Option<String> {
+    // --help and --version arrive as "errors" too; they are not failures and
+    // want no hint appended.
+    use clap::error::ErrorKind;
+    if matches!(
+        err.kind(),
+        ErrorKind::DisplayHelp
+            | ErrorKind::DisplayVersion
+            | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+    ) {
+        return None;
     }
+    // Match whole flag tokens: a bare substring search finds "-f" inside
+    // prose like "figlet-family".
+    let text = err.to_string();
+    let mentions = |flag: &str| {
+        text.split(|c: char| !(c.is_alphanumeric() || c == '-' || c == '_'))
+            .any(|tok| tok == flag)
+    };
+    let (label, command) = if mentions("--fit") {
+        (
+            "a column count, or:",
+            "dotbanner render \"text\" --fit terminal",
+        )
+    } else if mentions("--font") || mentions("-f") {
+        (
+            "font names, quoted and ready to paste:",
+            "dotbanner show fonts [filter]",
+        )
+    } else if mentions("--style") || mentions("-s") {
+        ("every style, rendered:", "dotbanner show styles")
+    } else if mentions("--colors") || mentions("-c") {
+        ("every colour preset, rendered:", "dotbanner show colors")
+    } else if mentions("--recipe") {
+        (
+            "build one from flags first:",
+            "dotbanner recipe \"text\" --style band",
+        )
+    } else {
+        return None;
+    };
+    Some(format!("  {} {}", hint(label), cmd(command)))
 }
 
 fn run() -> Result<String, String> {
@@ -332,18 +406,22 @@ fn run() -> Result<String, String> {
 /// `show` with no topic lists the topics rather than erroring.
 fn show_topics() -> String {
     format!(
-        "\x1b[1mdotbanner show\x1b[0m <topic>\n\n  \
-         \x1b[1mstyles\x1b[0m     every effect, rendered           {}\n  \
-         \x1b[1mgradients\x1b[0m  every colour preset, rendered    {}\n  \
-         \x1b[1mfonts\x1b[0m      installed families, quoted for --font\n  \
-         \x1b[1mregisters\x1b[0m  which glyphs a layer can draw with\n\n\
-         \x1b[2mEach takes optional text: dotbanner show styles \"my text\"\x1b[0m\n",
-        presets::STYLES.join(", "),
-        presets::GRADIENTS
-            .iter()
-            .map(|g| g.name)
-            .collect::<Vec<_>>()
-            .join(", ")
+        "{} <topic>\n\n  {}  every effect, rendered        {}\n  {}  every colour preset, rendered {}\n  \
+         {}  installed families, quoted for --font\n  {}  which glyphs a layer can draw with\n\n{}\n",
+        heading("dotbanner show"),
+        name("styles   "),
+        hint(&presets::STYLES.join(", ")),
+        name("colors   "),
+        hint(
+            &presets::GRADIENTS
+                .iter()
+                .map(|g| g.name)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        name("fonts    "),
+        name("registers"),
+        hint("Each takes optional text: dotbanner show styles \"my text\""),
     )
 }
 
@@ -355,7 +433,7 @@ fn main() -> ExitCode {
             ExitCode::SUCCESS
         }
         Err(msg) => {
-            eprintln!("dotbanner: {msg}");
+            eprintln!("{} {msg}", bad("dotbanner:"));
             ExitCode::FAILURE
         }
     }

@@ -230,6 +230,28 @@ pub fn load_font(family: &str, style: Option<&str>) -> Result<(Vec<u8>, u32), En
     }
 }
 
+/// The terminal's width in columns, falling back to a conventional 80 when
+/// it cannot be measured (a pipe, a dumb terminal).
+pub fn terminal_columns() -> usize {
+    std::env::var("COLUMNS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|n| *n > 0)
+        .unwrap_or_else(|| {
+            // `tput cols` consults the terminfo database and the tty, which
+            // works even when COLUMNS is not exported.
+            std::process::Command::new("tput")
+                .arg("cols")
+                .stderr(std::process::Stdio::null())
+                .output()
+                .ok()
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .and_then(|s| s.trim().parse().ok())
+                .filter(|n: &usize| *n > 0)
+                .unwrap_or(80)
+        })
+}
+
 /// List available font families, sorted and deduplicated.
 pub fn list_families() -> Vec<String> {
     let mut db = fontdb::Database::new();
@@ -429,10 +451,33 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
     // Registers share a 2×12 pixel cell footprint (ADR-201), so the mask
     // rasterizes at 12 pixel rows per output row. Em size overshoots ink
     // height, so scale by a typical cap-height ratio.
-    let px = (recipe.rows as f32 * 12.0) / 0.72;
-    // One cell of air between glyphs: at banner sizes, natural side bearings
-    // quantize away and letters collide.
-    let base = rasterize_tracked(&bytes, index, &recipe.text, px, 0.5, px * 0.06)?;
+    // Rasterize at the requested height, then shrink until the result fits
+    // any width limit. Each attempt is a full rasterization, but the loop is
+    // bounded by the row count and a banner is small.
+    let mut rows = recipe.rows().max(1);
+    let limit = match recipe.size.fit {
+        Some(crate::recipe::Fit::Columns(n)) => Some(n.max(1)),
+        Some(crate::recipe::Fit::Terminal) => Some(terminal_columns()),
+        None => None,
+    };
+    let base = loop {
+        let px = (rows as f32 * 12.0) / 0.72;
+        // Banner text needs air between glyphs: natural side bearings
+        // quantize away at these sizes and letters collide.
+        let mask = rasterize_tracked(
+            &bytes,
+            index,
+            &recipe.text,
+            px,
+            0.5,
+            px * recipe.size.tracking,
+        )?;
+        match limit {
+            // Six mask pixels per output column (ADR-201).
+            Some(cols) if mask.width().div_ceil(6) > cols && rows > 1 => rows -= 1,
+            _ => break mask,
+        }
+    };
 
     let mut layers = Vec::new();
     for op in &recipe.pipeline {

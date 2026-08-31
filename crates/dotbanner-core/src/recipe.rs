@@ -20,7 +20,49 @@ fn default_rows() -> usize {
     8
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+fn default_tracking() -> f32 {
+    0.06
+}
+
+/// How a banner is sized. `rows` is the height in terminal rows; `fit`
+/// optionally caps the width, shrinking `rows` until the render fits.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Size {
+    #[serde(default = "default_rows")]
+    pub rows: usize,
+    /// Maximum width in terminal columns. `Fit::Terminal` measures the
+    /// current terminal; `Fit::Columns(n)` pins a number; absent means the
+    /// banner is whatever width the text comes out as.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fit: Option<Fit>,
+    /// Extra space between glyphs, as a fraction of the em. Banner text
+    /// needs more air than body text once quantized to cells; condensed and
+    /// monospace faces want less than the default.
+    #[serde(default = "default_tracking")]
+    pub tracking: f32,
+}
+
+impl Default for Size {
+    fn default() -> Self {
+        Self {
+            rows: default_rows(),
+            fit: None,
+            tracking: default_tracking(),
+        }
+    }
+}
+
+/// A width limit.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Fit {
+    /// Measure the terminal at render time.
+    Terminal,
+    /// A fixed number of columns.
+    Columns(usize),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Recipe {
     #[serde(default = "default_version")]
     pub version: u32,
@@ -29,8 +71,12 @@ pub struct Recipe {
     pub text: String,
     #[serde(default)]
     pub font: Font,
-    #[serde(default = "default_rows")]
-    pub rows: usize,
+    /// Deprecated spelling of `size.rows`, still read so recipes written
+    /// before `size` existed keep loading (ADR-200).
+    #[serde(default, skip_serializing)]
+    pub rows: Option<usize>,
+    #[serde(default)]
+    pub size: Size,
     #[serde(default)]
     pub pipeline: Vec<Op>,
     #[serde(default)]
@@ -46,7 +92,8 @@ impl Recipe {
             name: None,
             text: text.into(),
             font: Font::default(),
-            rows: default_rows(),
+            rows: None,
+            size: Size::default(),
             pipeline: vec![Op::Fill {
                 inset: 0,
                 kind: Fill::Solid {
@@ -56,6 +103,15 @@ impl Recipe {
                 on_top: false,
             }],
             symbolizer: SymbolizerSpec::default(),
+        }
+    }
+
+    /// The effective height, preferring `size.rows` and falling back to the
+    /// legacy top-level `rows`.
+    pub fn rows(&self) -> usize {
+        match self.rows {
+            Some(n) if self.size.rows == default_rows() => n,
+            _ => self.size.rows,
         }
     }
 
@@ -213,7 +269,12 @@ mod tests {
                 family: "Pirata One".into(),
                 style: Some("Regular".into()),
             },
-            rows: 8,
+            rows: None,
+            size: Size {
+                rows: 8,
+                fit: None,
+                tracking: default_tracking(),
+            },
             pipeline: vec![
                 Op::Fill {
                     inset: 0,
@@ -259,8 +320,30 @@ mod tests {
         let r = Recipe::from_json(r#"{"text":"hi"}"#).unwrap();
         assert_eq!(r.text, "hi");
         assert_eq!(r.version, SCHEMA_VERSION);
-        assert_eq!(r.rows, 8);
+        assert_eq!(r.rows(), 8);
         assert_eq!(r.symbolizer.body, Register::Blocks);
+    }
+
+    #[test]
+    fn legacy_top_level_rows_still_loads() {
+        // Recipes written before `size` existed keep working (ADR-200).
+        let r = Recipe::from_json(r#"{"text":"hi","rows":14}"#).unwrap();
+        assert_eq!(r.rows(), 14);
+    }
+
+    #[test]
+    fn size_block_wins_and_carries_fit() {
+        let json = r#"{"text":"hi","size":{"rows":6,"fit":"terminal","tracking":0.1}}"#;
+        let r = Recipe::from_json(json).unwrap();
+        assert_eq!(r.rows(), 6);
+        assert_eq!(r.size.fit, Some(Fit::Terminal));
+        assert!((r.size.tracking - 0.1).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn fit_accepts_a_column_count() {
+        let r = Recipe::from_json(r#"{"text":"hi","size":{"fit":{"columns":40}}}"#).unwrap();
+        assert_eq!(r.size.fit, Some(Fit::Columns(40)));
     }
 
     #[test]
