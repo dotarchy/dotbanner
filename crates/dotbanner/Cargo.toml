@@ -1,0 +1,10 @@
+[package]
+name = "dotbanner"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Terminal banner and figlet-family font generator"
+
+[dependencies]
+dotbanner-core = { path = "../dotbanner-core" }
