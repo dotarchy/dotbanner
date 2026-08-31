@@ -27,7 +27,7 @@ pub fn render(recipe: &Recipe) -> Result<CellGrid, engine::EngineError> {
         Register::Blocks => SymbolSet::Blocks,
         Register::Braille => SymbolSet::Braille,
         Register::Facets => SymbolSet::Facets,
-        Register::Unknown => SymbolSet::Blocks,
+        Register::Unknown(_) => SymbolSet::Blocks,
         Register::Sextants => SymbolSet::Sextants,
     };
     Ok(symbolizer::symbolize_layers(&layers, set))

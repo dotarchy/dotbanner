@@ -78,6 +78,24 @@ impl Mask {
         self.bits[y * self.width + x]
     }
 
+    /// A copy with `pad` clear pixels added on every side. Outward effects
+    /// need room beyond the letterform, and the rasterized mask is trimmed
+    /// to its ink, so the canvas has to grow before they run.
+    pub fn padded(&self, pad: usize) -> Self {
+        if pad == 0 {
+            return self.clone();
+        }
+        let mut out = Self::new(self.width + pad * 2, self.height + pad * 2);
+        for y in 0..self.height {
+            for x in 0..self.width {
+                if self.get(x, y) {
+                    out.set(x + pad, y + pad, true);
+                }
+            }
+        }
+        out
+    }
+
     /// # Panics
     ///
     /// Panics if `(x, y)` is outside the mask.
@@ -372,6 +390,9 @@ pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet)
                     continue;
                 }
                 if layer.on_top {
+                    // An overlay never wins the glyph through coverage; it
+                    // either passes the trapping test below or falls back to
+                    // the background slot (ADR-402).
                     overlay = Some((layer, count, sum_y));
                     continue;
                 }
@@ -387,13 +408,22 @@ pub fn symbolize_layers(layers: &[crate::engine::Layer], default_set: SymbolSet)
             // the body keeps its own crisp glyph, so a sparse overlay never
             // punches holes in the outline or squares it off.
             if let Some(top) = overlay {
-                if let Some((_, base_count, _)) = owner {
-                    if base_count == CELL_W * CELL_H {
+                match owner {
+                    // The body fills the cell, so the overlay may take it.
+                    Some((_, base_count, _)) if base_count == CELL_W * CELL_H => {
                         under = owner;
                         owner = Some(top);
                     }
-                } else {
-                    owner = Some(top);
+                    // Trapped out at the silhouette: the overlay keeps the
+                    // body's glyph intact but still colours behind it, so a
+                    // halo reads where it matters most (ADR-402).
+                    Some(_) => {
+                        if under.map(|(_, second, _)| top.1 >= second).unwrap_or(true) {
+                            under = Some(top);
+                        }
+                    }
+                    // Nothing beneath: the overlay is all there is.
+                    None => owner = Some(top),
                 }
             }
 
@@ -442,8 +472,10 @@ fn cell_glyph(
     let (x0, y0) = (col * cell_w, row * cell_h);
     let (sub_w, sub_h) = set.cell_size();
     let (bw, bh) = (cell_w / sub_w, cell_h / sub_h);
-    // A sub-cell is set when at least half its pixels are — majority keeps
-    // thin strokes without letting a single stray pixel fill a sub-cell.
+    // A sub-cell is set when a third of its pixels are. A majority rule
+    // loses thin strokes: a two-pixel stem straddling a sub-block boundary
+    // puts too few pixels in either half and the whole stem disappears.
+    let mut counts = vec![0usize; sub_w * sub_h];
     let mut sub = Mask::new(sub_w, sub_h);
     for sy in 0..sub_h {
         for sx in 0..sub_w {
@@ -455,8 +487,20 @@ fn cell_glyph(
                     }
                 }
             }
-            sub.set(sx, sy, on * 2 >= bw * bh);
+            counts[sy * sub_w + sx] = on;
+            sub.set(sx, sy, on * 3 >= bw * bh);
         }
+    }
+    // A cell holding ink must not render blank, or a stroke thinner than the
+    // threshold vanishes entirely. Fall back to its densest sub-cell.
+    if counts.iter().any(|c| *c > 0) && (0..sub_h).all(|y| (0..sub_w).all(|x| !sub.get(x, y))) {
+        let best = counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, c)| **c)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+        sub.set(best % sub_w, best / sub_w, true);
     }
     match set {
         SymbolSet::Blocks => quad_char(&sub, 0, 0),
@@ -556,6 +600,111 @@ mod tests {
         assert_eq!((grid.cols(), grid.rows()), (1, 1));
         assert_eq!(grid.get(0, 0).map(|c| c.ch), Some('█'));
         assert_eq!(grid.get(1, 0), None);
+    }
+
+    /// One full cell of the shared 6×12 layer footprint.
+    fn cell(fill: bool) -> Mask {
+        let row = if fill { "######" } else { "      " };
+        Mask::from_sketch(&[row].repeat(12).join("\n"))
+    }
+
+    fn layer(mask: Mask, rgb: (u8, u8, u8), set: SymbolSet, on_top: bool) -> crate::engine::Layer {
+        crate::engine::Layer {
+            mask,
+            paint: crate::engine::Paint::Solid(crate::color::Rgb::new(rgb.0, rgb.1, rgb.2)),
+            register: Some(set),
+            on_top,
+        }
+    }
+
+    #[test]
+    fn composition_winner_takes_glyph_and_runner_up_takes_background() {
+        // ADR-402: two layers share a cell rather than one erasing the other.
+        let layers = vec![
+            layer(cell(true), (0, 0, 255), SymbolSet::Braille, false),
+            layer(cell(true), (255, 0, 0), SymbolSet::Blocks, false),
+        ];
+        let grid = symbolize_layers(&layers, SymbolSet::Blocks);
+        let c = grid.get(0, 0).unwrap();
+        assert_eq!(c.ch, '█', "the later layer wins the tie and draws");
+        assert_eq!(c.fg.map(|f| (f.r, f.g, f.b)), Some((255, 0, 0)));
+        assert_eq!(c.bg.map(|f| (f.r, f.g, f.b)), Some((0, 0, 255)));
+    }
+
+    #[test]
+    fn a_trapped_out_overlay_still_paints_the_background() {
+        // ADR-402: a layer that loses every cell it touches still
+        // contributes colour — otherwise a halo vanishes at the silhouette,
+        // which is exactly where it should read.
+        let mut half = Mask::new(6, 12);
+        for y in 0..6 {
+            for x in 0..6 {
+                half.set(x, y, true);
+            }
+        }
+        let layers = vec![
+            layer(half, (10, 10, 10), SymbolSet::Blocks, false),
+            layer(cell(true), (200, 200, 200), SymbolSet::Braille, true),
+        ];
+        let grid = symbolize_layers(&layers, SymbolSet::Blocks);
+        let c = grid.get(0, 0).unwrap();
+        assert_eq!(c.ch, '▀', "the body keeps its glyph at a partial cell");
+        assert_eq!(c.fg.map(|f| (f.r, f.g, f.b)), Some((10, 10, 10)));
+        assert_eq!(
+            c.bg.map(|f| (f.r, f.g, f.b)),
+            Some((200, 200, 200)),
+            "the trapped-out overlay colours behind it"
+        );
+    }
+
+    #[test]
+    fn an_overlay_takes_a_cell_the_body_fills() {
+        let layers = vec![
+            layer(cell(true), (10, 10, 10), SymbolSet::Blocks, false),
+            layer(cell(true), (200, 200, 200), SymbolSet::Braille, true),
+        ];
+        let c = symbolize_layers(&layers, SymbolSet::Blocks)
+            .get(0, 0)
+            .unwrap();
+        assert_eq!(c.ch, '⣿', "the overlay draws in its own register");
+        assert_eq!(c.bg.map(|f| (f.r, f.g, f.b)), Some((10, 10, 10)));
+    }
+
+    #[test]
+    fn a_background_needs_a_fully_covered_cell() {
+        // Painting a background from a partly covered cell would spill the
+        // rectangle past the silhouette.
+        let mut half = Mask::new(6, 12);
+        for y in 0..6 {
+            for x in 0..6 {
+                half.set(x, y, true);
+            }
+        }
+        let layers = vec![
+            layer(half, (0, 0, 255), SymbolSet::Blocks, false),
+            layer(cell(true), (255, 0, 0), SymbolSet::Blocks, false),
+        ];
+        let c = symbolize_layers(&layers, SymbolSet::Blocks)
+            .get(0, 0)
+            .unwrap();
+        assert_eq!(c.fg.map(|f| (f.r, f.g, f.b)), Some((255, 0, 0)));
+        assert_eq!(c.bg, None, "the partial layer must not fill the cell");
+    }
+
+    #[test]
+    fn a_thin_stroke_survives_downsampling() {
+        // A two-pixel stem straddling a sub-block boundary used to fall
+        // below the threshold in both halves and vanish entirely.
+        let mut mask = Mask::new(6, 12);
+        for y in 0..12 {
+            mask.set(2, y, true);
+            mask.set(3, y, true);
+        }
+        let layers = vec![layer(mask, (255, 255, 255), SymbolSet::Blocks, false)];
+        let c = symbolize_layers(&layers, SymbolSet::Blocks)
+            .get(0, 0)
+            .unwrap();
+        assert_ne!(c.ch, ' ', "a cell holding ink must not render blank");
     }
 
     /// Golden fixture: a small glyph-like shape pinned exactly in both sets.

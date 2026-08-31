@@ -78,10 +78,15 @@ impl Scheme {
             let at = i + found + 4;
             i = at;
             let idx: String = text[at..].chars().take(2).collect();
+            // Both characters must be hex digits: from_str_radix would
+            // otherwise accept a sign, so `base+5` would overwrite base05.
+            if idx.len() != 2 || !idx.chars().all(|c| c.is_ascii_hexdigit()) {
+                continue;
+            }
             let Ok(slot) = u8::from_str_radix(&idx, 16) else {
                 continue;
             };
-            if slot > 0x0F || idx.len() != 2 {
+            if slot > 0x0F {
                 continue;
             }
             // Take the first hex-looking token after the key, stopping at
@@ -121,28 +126,50 @@ impl Scheme {
         })
     }
 
-    /// The hex colours following a `ramp:` key, in order.
+    /// The hex colours of the `ramp` key, in order.
+    ///
+    /// The key is matched in both spellings a file might use — `ramp:` in
+    /// YAML and `"ramp":` in JSON — and the list ends at the first line that
+    /// starts a new top-level key, so a colour below the ramp is not
+    /// swallowed into it.
     fn declared_ramp(text: &str) -> Option<Vec<Rgb>> {
-        let start = text.find("ramp:")? + "ramp:".len();
+        let key = text
+            .find("ramp\"")
+            .map(|i| i + "ramp\"".len())
+            .or_else(|| text.find("ramp:").map(|i| i + "ramp:".len()))?;
         let mut out = Vec::new();
-        for line in text[start..].lines() {
-            let trimmed = line.trim();
-            // A blank line or a new top-level key ends the list.
+        let mut started = false;
+        for line in text[key..].lines() {
+            let raw = line;
+            let trimmed = raw.trim();
             if trimmed.is_empty() {
                 continue;
             }
-            let token: String = trimmed
-                .chars()
-                .skip_while(|c| *c != '#')
-                .take_while(|c| *c == '#' || c.is_ascii_hexdigit())
-                .collect();
-            match Rgb::parse(&token) {
-                Ok(rgb) => out.push(rgb),
-                Err(_) if out.is_empty() => continue,
-                Err(_) => break,
+            // A line at column zero that is not part of the list ends it.
+            let indented = raw.starts_with(char::is_whitespace);
+            let is_item = trimmed.starts_with('-') || trimmed.starts_with(['[', '"', '#']);
+            if started && !indented && !is_item {
+                break;
+            }
+            // One line can hold several colours: JSON and YAML flow style
+            // both write the whole list inline.
+            let mut rest = trimmed;
+            while let Some(at) = rest.find('#') {
+                let token: String = rest[at..]
+                    .chars()
+                    .take_while(|c| *c == '#' || c.is_ascii_hexdigit())
+                    .collect();
+                rest = &rest[at + token.len()..];
+                if let Ok(rgb) = Rgb::parse(&token) {
+                    out.push(rgb);
+                    started = true;
+                }
+            }
+            if trimmed.contains(']') && started {
+                break;
             }
         }
-        Some(out)
+        (!out.is_empty()).then_some(out)
     }
 
     /// Read a scheme file, taking its name from the file stem.
@@ -209,7 +236,15 @@ pub fn scheme_dirs() -> Vec<PathBuf> {
 /// Every scheme found on disk, sorted by name. A name found in an earlier
 /// directory wins, so a user's copy shadows a shared one.
 pub fn installed() -> Vec<Scheme> {
+    installed_reporting().0
+}
+
+/// Every scheme found on disk, plus the files that could not be read and
+/// why. A malformed palette is otherwise indistinguishable from a missing
+/// one, which makes a typo expensive to find.
+pub fn installed_reporting() -> (Vec<Scheme>, Vec<(PathBuf, String)>) {
     let mut found: Vec<Scheme> = Vec::new();
+    let mut problems: Vec<(PathBuf, String)> = Vec::new();
     for dir in scheme_dirs() {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             continue;
@@ -220,15 +255,21 @@ pub fn installed() -> Vec<Scheme> {
             if !matches!(ext, "yaml" | "yml" | "json") {
                 continue;
             }
-            if let Some(scheme) = Scheme::load(&path) {
-                if !found.iter().any(|s| s.name == scheme.name) {
-                    found.push(scheme);
+            match Scheme::load(&path) {
+                Some(scheme) => {
+                    if !found.iter().any(|s| s.name == scheme.name) {
+                        found.push(scheme);
+                    }
                 }
+                None => problems.push((
+                    path,
+                    "needs either all sixteen base16 slots or a ramp of hex colours".into(),
+                )),
             }
         }
     }
     found.sort_by(|a, b| a.name.cmp(&b.name));
-    found
+    (found, problems)
 }
 
 /// Every palette a name can resolve to: installed files first, so a file
@@ -323,6 +364,33 @@ base0F: "d65d0e"
             "base0F": "#d65d0e" }"##;
         let s = Scheme::parse("x", json).expect("parses");
         assert_eq!(s.slots.unwrap()[0x0A], Rgb::parse("#fabd2f").unwrap());
+    }
+
+    #[test]
+    fn a_json_ramp_loads() {
+        let json = r##"{ "name": "x", "ramp": ["#111111", "#222222", "#333333"] }"##;
+        let s = Scheme::parse("x", json).expect("json ramps parse");
+        assert_eq!(s.ramp().len(), 3);
+    }
+
+    #[test]
+    fn a_yaml_flow_ramp_loads_every_colour() {
+        let text = r##"ramp: ["#111111", "#222222", "#333333"]"##;
+        assert_eq!(Scheme::parse("x", text).unwrap().ramp().len(), 3);
+    }
+
+    #[test]
+    fn a_key_after_the_ramp_is_not_swallowed() {
+        let text = "ramp:\n  - \"#111111\"\n  - \"#222222\"\nbackground: \"#333333\"\n";
+        assert_eq!(Scheme::parse("x", text).unwrap().ramp().len(), 2);
+    }
+
+    #[test]
+    fn a_signed_slot_index_is_not_a_slot() {
+        // `base+5` must not overwrite base05.
+        let text = BASE16_YAML.to_string() + "base+5: \"#00ff00\"\n";
+        let s = Scheme::parse("x", &text).unwrap();
+        assert_eq!(s.slots.unwrap()[0x05], Rgb::parse("#d5c4a1").unwrap());
     }
 
     #[test]

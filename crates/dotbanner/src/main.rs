@@ -190,6 +190,17 @@ fn font_error(e: engine::EngineError) -> String {
         engine::EngineError::FontNotFound { query, .. } => {
             format!("no font matched '{query}'\n  list what is installed:  dotbanner show fonts")
         }
+        engine::EngineError::StyleNotFound {
+            family,
+            style,
+            available,
+        } => {
+            let list = available
+                .iter()
+                .map(|n| format!("\n    {}", name(n)))
+                .collect::<String>();
+            format!("'{family}' has no '{style}' face — it has:{list}")
+        }
         engine::EngineError::FontAmbiguous { query, matches } => {
             let list = matches
                 .iter()

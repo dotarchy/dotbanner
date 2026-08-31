@@ -38,8 +38,20 @@ pub struct Size {
     /// Extra space between glyphs, as a fraction of the em. Banner text
     /// needs more air than body text once quantized to cells; condensed and
     /// monospace faces want less than the default.
-    #[serde(default = "default_tracking")]
+    #[serde(default = "default_tracking", deserialize_with = "finite_tracking")]
     pub tracking: f32,
+}
+
+/// Reject a non-finite tracking: serde_json writes NaN and infinity as
+/// `null`, which the tool then cannot read back.
+fn finite_tracking<'de, D: serde::Deserializer<'de>>(d: D) -> Result<f32, D::Error> {
+    use serde::de::Error as _;
+    let v = f32::deserialize(d)?;
+    if v.is_finite() {
+        Ok(v)
+    } else {
+        Err(D::Error::custom("tracking must be a finite number"))
+    }
 }
 
 impl Default for Size {
@@ -62,7 +74,53 @@ pub enum Fit {
     Columns(usize),
 }
 
+/// The wire shape of a recipe. It exists so the deprecated top-level `rows`
+/// can be folded into `size` at load, leaving the domain type with exactly
+/// one height field — a second one invites the two disagreeing.
+#[derive(Deserialize)]
+struct RecipeWire {
+    #[serde(default = "default_version")]
+    version: u32,
+    #[serde(default)]
+    name: Option<String>,
+    text: String,
+    #[serde(default)]
+    font: Font,
+    /// Deprecated spelling of `size.rows`, read so recipes written before
+    /// `size` existed keep loading (ADR-200).
+    #[serde(default)]
+    rows: Option<usize>,
+    #[serde(default)]
+    size: Option<Size>,
+    #[serde(default)]
+    pipeline: Vec<Stage>,
+    #[serde(default)]
+    symbolizer: SymbolizerSpec,
+}
+
+impl From<RecipeWire> for Recipe {
+    fn from(w: RecipeWire) -> Self {
+        // An explicit `size` wins; otherwise the legacy height applies.
+        let mut size = w.size.unwrap_or_default();
+        if w.size.is_none() {
+            if let Some(rows) = w.rows {
+                size.rows = rows;
+            }
+        }
+        Recipe {
+            version: w.version,
+            name: w.name,
+            text: w.text,
+            font: w.font,
+            size,
+            pipeline: w.pipeline,
+            symbolizer: w.symbolizer,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RecipeWire")]
 pub struct Recipe {
     #[serde(default = "default_version")]
     pub version: u32,
@@ -71,10 +129,6 @@ pub struct Recipe {
     pub text: String,
     #[serde(default)]
     pub font: Font,
-    /// Deprecated spelling of `size.rows`, still read so recipes written
-    /// before `size` existed keep loading (ADR-200).
-    #[serde(default, skip_serializing)]
-    pub rows: Option<usize>,
     #[serde(default)]
     pub size: Size,
     #[serde(default)]
@@ -92,7 +146,6 @@ impl Recipe {
             name: None,
             text: text.into(),
             font: Font::default(),
-            rows: None,
             size: Size::default(),
             pipeline: vec![Op::Fill {
                 inset: 0,
@@ -107,13 +160,9 @@ impl Recipe {
         }
     }
 
-    /// The effective height, preferring `size.rows` and falling back to the
-    /// legacy top-level `rows`.
+    /// The banner's height in terminal rows.
     pub fn rows(&self) -> usize {
-        match self.rows {
-            Some(n) if self.size.rows == default_rows() => n,
-            _ => self.size.rows,
-        }
+        self.size.rows
     }
 
     /// The ops this build can render, in order.
@@ -166,11 +215,38 @@ impl Default for Font {
 /// reaches an older one. An unknown effect makes that one layer
 /// unrenderable, not the whole banner — the raw JSON is kept so the recipe
 /// survives a round-trip through a build that cannot draw it (ADR-202).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub enum Stage {
     Known(Op),
     Unknown(serde_json::Value),
+}
+
+/// Op names this build renders. A stage naming one of these must parse as
+/// that op or fail loudly; only an unrecognised name degrades.
+const KNOWN_OPS: &[&str] = &["fill", "rim", "cast", "edge"];
+
+/// Fill kinds this build paints with. A newer kind degrades the layer the
+/// same way a newer op does; a misspelled *field* inside a known kind does
+/// not, because that is a mistake rather than a newer schema.
+const KNOWN_FILLS: &[&str] = &["solid", "band"];
+
+impl<'de> Deserialize<'de> for Stage {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+        let value = serde_json::Value::deserialize(d)?;
+        let tag = value.get("op").and_then(|t| t.as_str()).unwrap_or_default();
+        let kind = value.get("kind").and_then(|k| k.as_str());
+        let kind_known = kind.is_none_or(|k| KNOWN_FILLS.contains(&k));
+        if KNOWN_OPS.contains(&tag) && kind_known {
+            // This build knows the op, so a problem inside it is a mistake in
+            // the recipe, not a newer schema. Report it rather than dropping
+            // the layer (ADR-202).
+            let op = Op::deserialize(&value).map_err(D::Error::custom)?;
+            return Ok(Stage::Known(op));
+        }
+        Ok(Stage::Unknown(value))
+    }
 }
 
 impl From<Op> for Stage {
@@ -289,8 +365,7 @@ pub enum Fill {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Register {
     #[default]
     Blocks,
@@ -301,13 +376,45 @@ pub enum Register {
     /// Faceted blocks — three-quadrant patterns render as large triangles,
     /// giving edges a cut-face read rather than a step.
     Facets,
-    /// A register this build does not know. The layer still paints, in
-    /// whatever register the recipe's body uses.
-    #[serde(other)]
-    Unknown,
+    /// A register this build does not know, keeping its name so saving the
+    /// recipe does not rewrite it (ADR-202). The layer still paints, in the
+    /// default register.
+    Unknown(String),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+impl Register {
+    /// The name as it appears on the wire.
+    pub fn as_str(&self) -> &str {
+        match self {
+            Register::Blocks => "blocks",
+            Register::Braille => "braille",
+            Register::Sextants => "sextants",
+            Register::Facets => "facets",
+            Register::Unknown(name) => name,
+        }
+    }
+}
+
+impl Serialize for Register {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Register {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let name = String::deserialize(d)?;
+        Ok(match name.as_str() {
+            "blocks" => Register::Blocks,
+            "braille" => Register::Braille,
+            "sextants" => Register::Sextants,
+            "facets" => Register::Facets,
+            _ => Register::Unknown(name),
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SymbolizerSpec {
     #[serde(default)]
     pub body: Register,
@@ -335,7 +442,6 @@ mod tests {
                 family: "Pirata One".into(),
                 style: Some("Regular".into()),
             },
-            rows: None,
             size: Size {
                 rows: 8,
                 fit: None,
@@ -441,6 +547,53 @@ mod tests {
         let json = r##"{"text":"x","pipeline":[{"op":"fill","kind":"radial","color":"#ffffff"}]}"##;
         let r = Recipe::from_json(json).expect("still loads");
         assert_eq!(r.ops().count(), 0);
+    }
+
+    #[test]
+    fn a_mistake_inside_a_known_op_is_an_error_not_a_shrug() {
+        // A misspelled field must not silently drop the layer and blame an
+        // op this build plainly has (ADR-202).
+        let json = r##"{"text":"x","pipeline":[{"op":"fill","kind":"solid","colour":"#ff0000"}]}"##;
+        assert!(
+            Recipe::from_json(json).is_err(),
+            "the typo must be reported"
+        );
+    }
+
+    #[test]
+    fn a_bad_colour_inside_a_known_op_is_an_error() {
+        let json = r##"{"text":"x","pipeline":[{"op":"fill","kind":"solid","color":"#gggggg"}]}"##;
+        assert!(Recipe::from_json(json).is_err());
+    }
+
+    #[test]
+    fn an_unknown_register_keeps_its_name_on_save() {
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"fill","kind":"solid","color":"#ffffff","register":"hexants"}]}"##;
+        let r = Recipe::from_json(json).unwrap();
+        assert!(
+            r.to_json().contains("hexants"),
+            "saving must not rewrite a register this build cannot draw"
+        );
+    }
+
+    #[test]
+    fn a_legacy_rows_survives_a_round_trip() {
+        // Every shipped preset uses the top-level spelling.
+        let r = Recipe::from_json(r#"{"text":"x","rows":12}"#).unwrap();
+        assert_eq!(r.rows(), 12);
+        assert_eq!(Recipe::from_json(&r.to_json()).unwrap().rows(), 12);
+    }
+
+    #[test]
+    fn an_explicit_size_wins_over_legacy_rows() {
+        let r = Recipe::from_json(r#"{"text":"x","rows":14,"size":{"rows":6}}"#).unwrap();
+        assert_eq!(r.rows(), 6);
+    }
+
+    #[test]
+    fn a_non_finite_tracking_is_rejected() {
+        assert!(Recipe::from_json(r#"{"text":"x","size":{"tracking":null}}"#).is_err());
     }
 
     #[test]

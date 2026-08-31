@@ -29,16 +29,18 @@ every part of the system reads and writes:
   "name": "omarchy-laser",
   "text": "dotarchy",
   "font": { "family": "Pirata One", "style": "Regular" },
-  "rows": 8,
+  "size": { "rows": 8 },
   "pipeline": [
-    { "op": "mask" },
     { "op": "fill", "kind": "band", "stops": ["#f8ffff", "#a8ecfa", "#3f7fe8", "#8a2fc8"], "steps": 10 },
-    { "op": "rim", "erode": 5, "color": "#e8f6ff" }
+    { "op": "rim", "width": 5, "kind": "solid", "color": "#e8f6ff" }
   ],
   "symbolizer": { "body": "blocks", "cast": "braille" },
   "animate": { "roll": "vertical", "frames": 24 }
 }
 ```
+
+The op shapes above are ADR-201's; this sketch is kept current so a reader
+does not take a superseded spelling for the schema.
 
 - **Presets are shipped recipes** — the built-in gallery is a directory of
   these files, browsed with the same `show` convention users get.

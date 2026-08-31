@@ -81,6 +81,17 @@ pub enum EngineError {
     },
     FontUnreadable(String),
     EmptyRender,
+    /// The family exists but has no face in the requested style.
+    StyleNotFound {
+        family: String,
+        style: String,
+        available: Vec<String>,
+    },
+    /// The requested size would need more pixels than is sane to allocate.
+    TooLarge {
+        rows: usize,
+        pixels: u64,
+    },
 }
 
 impl std::fmt::Display for EngineError {
@@ -90,8 +101,14 @@ impl std::fmt::Display for EngineError {
             EngineError::FontAmbiguous { query, .. } => {
                 write!(f, "'{query}' matches several families")
             }
+            EngineError::StyleNotFound { family, style, .. } => {
+                write!(f, "'{family}' has no '{style}' face")
+            }
             EngineError::FontUnreadable(p) => write!(f, "could not read font: {p}"),
             EngineError::EmptyRender => write!(f, "text rendered to nothing"),
+            EngineError::TooLarge { rows, pixels } => {
+                write!(f, "{rows} rows needs {pixels} pixels — too large to render")
+            }
         }
     }
 }
@@ -197,26 +214,32 @@ pub fn load_font(family: &str, style: Option<&str>) -> Result<(Vec<u8>, u32), En
         }
     };
 
+    // Sort the family's faces before choosing: fontdb yields them in
+    // filesystem scan order, so an unsorted fallback would pick a different
+    // face on another machine and break the reproducibility ADR-400 needs.
+    let mut faces: Vec<&fontdb::FaceInfo> = db
+        .faces()
+        .filter(|f| f.families.iter().any(|(n, _)| n == &resolved))
+        .collect();
+    faces.sort_by(|a, b| a.post_script_name.cmp(&b.post_script_name));
+
     let want_style = style.map(str::to_ascii_lowercase);
-    let mut best: Option<&fontdb::FaceInfo> = None;
-    for face in db.faces() {
-        if !face.families.iter().any(|(n, _)| n == &resolved) {
-            continue;
-        }
-        let post = face.post_script_name.to_ascii_lowercase();
-        let is_wanted = match &want_style {
-            Some(s) => post.contains(&fold(s)) || post.contains(s.as_str()),
-            None => face.weight == fontdb::Weight::NORMAL && face.style == fontdb::Style::Normal,
-        };
-        if is_wanted {
-            best = Some(face);
-            break;
-        }
-        best.get_or_insert(face);
-    }
-    let face = best.ok_or_else(|| EngineError::FontNotFound {
-        query: family.to_string(),
-        near: vec![resolved.clone()],
+    let chosen = match &want_style {
+        Some(s) => faces.iter().find(|f| {
+            let post = f.post_script_name.to_ascii_lowercase();
+            post.contains(&fold(s)) || post.contains(s.as_str())
+        }),
+        None => faces
+            .iter()
+            .find(|f| f.weight == fontdb::Weight::NORMAL && f.style == fontdb::Style::Normal)
+            .or_else(|| faces.first()),
+    };
+    // A style that matches nothing is a mistake worth reporting: rendering
+    // some other face silently is how a recipe stops being reproducible.
+    let face = *chosen.ok_or_else(|| EngineError::StyleNotFound {
+        family: resolved.clone(),
+        style: want_style.clone().unwrap_or_default(),
+        available: faces.iter().map(|f| f.post_script_name.clone()).collect(),
     })?;
     match &face.source {
         fontdb::Source::File(path) => {
@@ -297,8 +320,17 @@ pub fn rasterize_tracked(
         w.ceil() as usize + 2
     };
     let height = (scaled.height().ceil() as usize) + 2;
-    if width == 0 || height == 0 {
-        return Err(EngineError::EmptyRender);
+    // The empty case is caught after thresholding, where an uninked mask is
+    // actually detectable; width and height here are always at least 2.
+    // Refuse before allocating: an unbounded row count otherwise aborts the
+    // process on a failed allocation rather than returning an error.
+    const MAX_PIXELS: u64 = 64 << 20;
+    let pixels = width as u64 * height as u64;
+    if pixels > MAX_PIXELS {
+        return Err(EngineError::TooLarge {
+            rows: (px * 0.72 / 12.0).round() as usize,
+            pixels,
+        });
     }
     let mut cov = vec![0.0f32; width * height];
 
@@ -451,33 +483,69 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
     // Registers share a 2×12 pixel cell footprint (ADR-201), so the mask
     // rasterizes at 12 pixel rows per output row. Em size overshoots ink
     // height, so scale by a typical cap-height ratio.
-    // Rasterize at the requested height, then shrink until the result fits
-    // any width limit. Each attempt is a full rasterization, but the loop is
-    // bounded by the row count and a banner is small.
-    let mut rows = recipe.rows().max(1);
+    // Outward ops paint beyond the letterform, and the rasterized mask is
+    // trimmed to its ink, so the canvas is padded by the furthest any op
+    // reaches before the pipeline runs.
+    let pad = recipe
+        .ops()
+        .map(|op| match op {
+            Op::Cast { spread, dx, dy, .. } => {
+                *spread as usize + dx.unsigned_abs() as usize + dy.unsigned_abs() as usize
+            }
+            Op::Edge { outer, .. } => *outer as usize,
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0);
+
+    let requested = recipe.rows().max(1);
     let limit = match recipe.size.fit {
         Some(crate::recipe::Fit::Columns(n)) => Some(n.max(1)),
         Some(crate::recipe::Fit::Terminal) => Some(terminal_columns()),
         None => None,
     };
-    let base = loop {
+
+    let raster = |rows: usize| -> Result<Mask, EngineError> {
         let px = (rows as f32 * 12.0) / 0.72;
         // Banner text needs air between glyphs: natural side bearings
         // quantize away at these sizes and letters collide.
-        let mask = rasterize_tracked(
+        rasterize_tracked(
             &bytes,
             index,
             &recipe.text,
             px,
             0.5,
             px * recipe.size.tracking,
-        )?;
-        match limit {
-            // Six mask pixels per output column (ADR-201).
-            Some(cols) if mask.width().div_ceil(6) > cols && rows > 1 => rows -= 1,
-            _ => break mask,
-        }
+        )
     };
+
+    let mut base = raster(requested)?;
+    if let Some(cols) = limit {
+        // Width scales with the row count, so solve for the rows that fit
+        // rather than stepping down one at a time. One correction pass
+        // absorbs the rounding.
+        let mut rows = requested;
+        for _ in 0..2 {
+            let have = base.width().div_ceil(6);
+            if have <= cols {
+                break;
+            }
+            let scaled = (rows * cols) / have.max(1);
+            let next = scaled.clamp(1, rows.saturating_sub(1));
+            if next == rows {
+                break;
+            }
+            rows = next;
+            base = raster(rows)?;
+        }
+        // The estimate can still land a column or two over; walk the
+        // remainder down, which is now a step or two rather than hundreds.
+        while base.width().div_ceil(6) > cols && rows > 1 {
+            rows -= 1;
+            base = raster(rows)?;
+        }
+    }
+    let base = base.padded(pad);
 
     let mut layers = Vec::new();
     for op in recipe.ops() {
@@ -560,7 +628,7 @@ fn register_to_set(r: &crate::recipe::Register) -> crate::symbolizer::SymbolSet 
         crate::recipe::Register::Sextants => crate::symbolizer::SymbolSet::Sextants,
         // A register this build does not know falls back to the default, so
         // the layer still paints (ADR-202).
-        crate::recipe::Register::Unknown => crate::symbolizer::SymbolSet::Blocks,
+        crate::recipe::Register::Unknown(_) => crate::symbolizer::SymbolSet::Blocks,
     }
 }
 
