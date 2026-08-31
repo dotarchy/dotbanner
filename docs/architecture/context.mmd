@@ -1,0 +1,42 @@
+%% dotbanner system context — the render pipeline (ADR-200/300/400).
+%% This diagram is also the TUI's mental model: the interface presents this
+%% flow as a live flowchart that matures as the user selects each node.
+flowchart LR
+    subgraph inputs [Inputs]
+        T["text"]
+        F["system fonts<br>(fontdb)"]
+        R["recipe JSON"]
+    end
+
+    subgraph core [dotbanner-core]
+        M["mask<br>(ab_glyph raster)"]
+        FX["effects<br>fill / rim / cast"]
+        S["symbolizer<br>pixels to cells"]
+    end
+
+    subgraph sinks [Outputs]
+        P["terminal preview"]
+        FT["font files<br>.tlf / .flf / cfonts"]
+        A["animations<br>.ans / .sh"]
+    end
+
+    T --> M
+    F --> M
+    R --> FX
+    M --> FX --> S
+    S --> P
+    S --> FT
+    S --> A
+
+    style T fill:#475569,color:#ffffff
+    style F fill:#475569,color:#ffffff
+    style R fill:#f6821f,color:#1a1a1a
+    style M fill:#2d7d9a,color:#ffffff
+    style FX fill:#2d7d9a,color:#ffffff
+    style S fill:#7c3aed,color:#ffffff
+    style P fill:#2d8e5e,color:#ffffff
+    style FT fill:#2d8e5e,color:#ffffff
+    style A fill:#2d8e5e,color:#ffffff
+    style inputs stroke:#94a3b8,fill:#4755691a
+    style core stroke:#8b5cf6,fill:#7c3aed1a
+    style sinks stroke:#34d399,fill:#2d8e5e1a
