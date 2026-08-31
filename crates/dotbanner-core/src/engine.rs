@@ -88,6 +88,14 @@ impl std::error::Error for EngineError {}
 /// Locate a font file by family (and optional style) using the system font
 /// database. Returns the file bytes and the face index within it.
 pub fn load_font(family: &str, style: Option<&str>) -> Result<(Vec<u8>, u32), EngineError> {
+    // A path loads the file directly, so a font can be tried without being
+    // installed system-wide.
+    let path = std::path::Path::new(family);
+    if path.is_file() {
+        let bytes =
+            std::fs::read(path).map_err(|_| EngineError::FontUnreadable(family.to_string()))?;
+        return Ok((bytes, 0));
+    }
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
     let want_style = style.map(str::to_ascii_lowercase);
