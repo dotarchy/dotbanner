@@ -113,7 +113,7 @@ fn build_recipe(args: &RenderArgs) -> Result<Recipe, String> {
             } else {
                 std::fs::read_to_string(path).map_err(|e| format!("reading {path}: {e}"))?
             };
-            Recipe::from_json(&json).map_err(|e| format!("parsing recipe: {e}"))?
+            Recipe::from_json(&json).map_err(|e| recipe_error(path, &json, &e))?
         }
         None => {
             let text = args
@@ -123,7 +123,7 @@ fn build_recipe(args: &RenderArgs) -> Result<Recipe, String> {
             let mut r = Recipe::new(text);
             let colors = presets::resolve_colors(&args.colors)
                 .ok_or_else(|| format!("unknown gradient or bad colors: {}", args.colors))?;
-            r.pipeline = if args.style == "trap" {
+            let ops = if args.style == "trap" {
                 presets::trap_pipeline(&colors, args.trap_width)
             } else {
                 presets::style_pipeline(&args.style, &colors).ok_or_else(|| {
@@ -134,6 +134,7 @@ fn build_recipe(args: &RenderArgs) -> Result<Recipe, String> {
                     )
                 })?
             };
+            r.pipeline = ops.into_iter().map(Into::into).collect();
             r
         }
     };
@@ -200,8 +201,59 @@ fn font_error(e: engine::EngineError) -> String {
     }
 }
 
+/// Present a parse failure the way the file reads: what was unexpected,
+/// where, and the offending line. serde carries the expectation and the
+/// position; this puts them next to the text they refer to.
+fn recipe_error(path: &str, json: &str, err: &dotbanner_core::serde_json::Error) -> String {
+    let (line, col) = (err.line(), err.column());
+    let source = if line > 0 {
+        json.lines()
+            .nth(line - 1)
+            .map(|text| {
+                let caret = " ".repeat(col.saturating_sub(1));
+                format!("\n  {}\n  {}{}", text.trim_end(), caret, name("^"))
+            })
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
+    let where_ = if line > 0 {
+        format!("{path}:{line}:{col}")
+    } else {
+        path.to_string()
+    };
+    format!(
+        "{where_}: {err}{source}\n  {} {}",
+        hint("a valid recipe of this shape:"),
+        cmd("dotbanner recipe \"text\" --style band"),
+    )
+}
+
 fn render(args: &RenderArgs) -> Result<String, String> {
     let recipe = build_recipe(args)?;
+    // A layer this build cannot draw is skipped, not fatal — but say so, or
+    // the banner is quietly missing an effect the recipe asked for.
+    let skipped = recipe.unknown_ops();
+    if !skipped.is_empty() {
+        eprintln!(
+            "{} this build has no effect named {} — {} layer(s) skipped",
+            hint("note:"),
+            skipped
+                .iter()
+                .map(|s| name(s))
+                .collect::<Vec<_>>()
+                .join(", "),
+            skipped.len(),
+        );
+    }
+    if recipe.is_newer_than_this_build() {
+        eprintln!(
+            "{} the recipe declares schema v{} and this build reads v{}",
+            hint("note:"),
+            recipe.version,
+            dotbanner_core::recipe::SCHEMA_VERSION,
+        );
+    }
     let grid = dotbanner_core::render(&recipe).map_err(font_error)?;
     Ok(ansi::to_ansi(&grid))
 }

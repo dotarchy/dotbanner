@@ -78,7 +78,7 @@ pub struct Recipe {
     #[serde(default)]
     pub size: Size,
     #[serde(default)]
-    pub pipeline: Vec<Op>,
+    pub pipeline: Vec<Stage>,
     #[serde(default)]
     pub symbolizer: SymbolizerSpec,
 }
@@ -101,7 +101,8 @@ impl Recipe {
                 },
                 register: None,
                 on_top: false,
-            }],
+            }
+            .into()],
             symbolizer: SymbolizerSpec::default(),
         }
     }
@@ -113,6 +114,24 @@ impl Recipe {
             Some(n) if self.size.rows == default_rows() => n,
             _ => self.size.rows,
         }
+    }
+
+    /// The ops this build can render, in order.
+    pub fn ops(&self) -> impl Iterator<Item = &Op> {
+        self.pipeline.iter().filter_map(|s| s.op())
+    }
+
+    /// Names of the stages this build cannot render.
+    pub fn unknown_ops(&self) -> Vec<String> {
+        self.pipeline
+            .iter()
+            .filter_map(|s| s.unknown_name())
+            .collect()
+    }
+
+    /// True when the file declares a schema newer than this build reads.
+    pub fn is_newer_than_this_build(&self) -> bool {
+        self.version > SCHEMA_VERSION
     }
 
     pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
@@ -136,6 +155,49 @@ impl Default for Font {
         Self {
             family: "DejaVu Sans".into(),
             style: None,
+        }
+    }
+}
+
+/// One entry in a recipe's pipeline: an op this build understands, or one
+/// it does not.
+///
+/// A recipe is a shared document, so a file written by a newer dotbanner
+/// reaches an older one. An unknown effect makes that one layer
+/// unrenderable, not the whole banner — the raw JSON is kept so the recipe
+/// survives a round-trip through a build that cannot draw it (ADR-202).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Stage {
+    Known(Op),
+    Unknown(serde_json::Value),
+}
+
+impl From<Op> for Stage {
+    fn from(op: Op) -> Self {
+        Stage::Known(op)
+    }
+}
+
+impl Stage {
+    /// The op, when this build understands it.
+    pub fn op(&self) -> Option<&Op> {
+        match self {
+            Stage::Known(op) => Some(op),
+            Stage::Unknown(_) => None,
+        }
+    }
+
+    /// The `op` name of a stage this build cannot render, for a warning.
+    pub fn unknown_name(&self) -> Option<String> {
+        match self {
+            Stage::Unknown(v) => Some(
+                v.get("op")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or("(no op field)")
+                    .to_string(),
+            ),
+            Stage::Known(_) => None,
         }
     }
 }
@@ -239,6 +301,10 @@ pub enum Register {
     /// Faceted blocks — three-quadrant patterns render as large triangles,
     /// giving edges a cut-face read rather than a step.
     Facets,
+    /// A register this build does not know. The layer still paints, in
+    /// whatever register the recipe's body uses.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -276,7 +342,7 @@ mod tests {
                 tracking: default_tracking(),
             },
             pipeline: vec![
-                Op::Fill {
+                Stage::Known(Op::Fill {
                     inset: 0,
                     kind: Fill::Band {
                         stops: vec![
@@ -287,16 +353,16 @@ mod tests {
                     },
                     register: None,
                     on_top: false,
-                },
-                Op::Rim {
+                }),
+                Stage::Known(Op::Rim {
                     width: 5,
                     kind: Fill::Solid {
                         color: Rgb::parse("#e8f6ff").unwrap(),
                     },
                     register: None,
                     on_top: false,
-                },
-                Op::Cast {
+                }),
+                Stage::Known(Op::Cast {
                     spread: 2,
                     dx: 2,
                     dy: 2,
@@ -305,7 +371,7 @@ mod tests {
                     },
                     register: Some(Register::Braille),
                     on_top: false,
-                },
+                }),
             ],
             symbolizer: SymbolizerSpec {
                 body: Register::Blocks,
@@ -347,6 +413,51 @@ mod tests {
     }
 
     #[test]
+    fn an_unknown_op_loses_its_layer_not_the_recipe() {
+        // A newer dotbanner's effect reaches an older build (ADR-202).
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"fill","kind":"solid","color":"#ffffff"},
+            {"op":"warp","amplitude":3}]}"##;
+        let r = Recipe::from_json(json).expect("the recipe still loads");
+        assert_eq!(r.ops().count(), 1, "the known op renders");
+        assert_eq!(r.unknown_ops(), vec!["warp"], "the unknown one is named");
+    }
+
+    #[test]
+    fn an_unknown_op_survives_a_round_trip() {
+        // An older build must not destroy an effect it cannot draw.
+        let json = r##"{"text":"x","pipeline":[{"op":"warp","amplitude":3}]}"##;
+        let r = Recipe::from_json(json).unwrap();
+        let back = Recipe::from_json(&r.to_json()).unwrap();
+        assert_eq!(back.unknown_ops(), vec!["warp"]);
+        assert!(
+            r.to_json().contains("amplitude"),
+            "the op's fields are kept"
+        );
+    }
+
+    #[test]
+    fn an_unknown_fill_kind_degrades_the_same_way() {
+        let json = r##"{"text":"x","pipeline":[{"op":"fill","kind":"radial","color":"#ffffff"}]}"##;
+        let r = Recipe::from_json(json).expect("still loads");
+        assert_eq!(r.ops().count(), 0);
+    }
+
+    #[test]
+    fn an_unknown_register_keeps_the_layer() {
+        let json = r##"{"text":"x","pipeline":[
+            {"op":"fill","kind":"solid","color":"#ffffff","register":"hexants"}]}"##;
+        let r = Recipe::from_json(json).expect("still loads");
+        assert_eq!(r.ops().count(), 1, "the layer still paints");
+    }
+
+    #[test]
+    fn a_newer_schema_version_is_detectable() {
+        let r = Recipe::from_json(r#"{"version":99,"text":"x"}"#).unwrap();
+        assert!(r.is_newer_than_this_build());
+    }
+
+    #[test]
     fn unknown_fields_are_ignored_not_rejected() {
         // Forward compatibility: a recipe written by a newer dotbanner still
         // loads here (ADR-200).
@@ -359,8 +470,8 @@ mod tests {
         let json = r##"{"text":"x","pipeline":[{"op":"fill","kind":"solid","color":"#ff0000"}]}"##;
         let r = Recipe::from_json(json).unwrap();
         assert_eq!(
-            r.pipeline,
-            vec![Op::Fill {
+            r.ops().collect::<Vec<_>>(),
+            vec![&Op::Fill {
                 inset: 0,
                 kind: Fill::Solid {
                     color: Rgb::new(255, 0, 0)
@@ -377,7 +488,7 @@ mod tests {
         let json = r##"{"text":"x","pipeline":[
             {"op":"rim","erode":3,"kind":"solid","color":"#ffffff"}]}"##;
         let r = Recipe::from_json(json).unwrap();
-        assert!(matches!(r.pipeline[0], Op::Rim { width: 3, .. }));
+        assert!(matches!(r.ops().next(), Some(Op::Rim { width: 3, .. })));
     }
 
     #[test]
@@ -386,14 +497,14 @@ mod tests {
             {"op":"cast","kind":"solid","color":"#000000","register":"braille"}]}"##;
         let r = Recipe::from_json(json).unwrap();
         assert!(matches!(
-            r.pipeline[0],
-            Op::Cast {
+            r.ops().next(),
+            Some(Op::Cast {
                 spread: 1,
                 dx: 0,
                 dy: 0,
                 register: Some(Register::Braille),
                 ..
-            }
+            })
         ));
     }
 }

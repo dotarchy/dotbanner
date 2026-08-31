@@ -480,7 +480,7 @@ pub fn render(recipe: &Recipe) -> Result<Vec<Layer>, EngineError> {
     };
 
     let mut layers = Vec::new();
-    for op in &recipe.pipeline {
+    for op in recipe.ops() {
         let (mask, kind, register, on_top) = match op {
             Op::Fill {
                 inset,
@@ -558,6 +558,9 @@ fn register_to_set(r: &crate::recipe::Register) -> crate::symbolizer::SymbolSet 
         crate::recipe::Register::Braille => crate::symbolizer::SymbolSet::Braille,
         crate::recipe::Register::Facets => crate::symbolizer::SymbolSet::Facets,
         crate::recipe::Register::Sextants => crate::symbolizer::SymbolSet::Sextants,
+        // A register this build does not know falls back to the default, so
+        // the layer still paints (ADR-202).
+        crate::recipe::Register::Unknown => crate::symbolizer::SymbolSet::Blocks,
     }
 }
 
